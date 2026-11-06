@@ -133,6 +133,7 @@ fn render(
     typing_used: Map([]),
     need_base: false,
     need_error: false,
+    errors: [],
     type_count: 0,
     func_count: 0,
     field_count: 0,
@@ -206,6 +207,11 @@ priv struct Emitter {
   typing_used : Map[String, Bool]
   mut need_base : Bool
   mut need_error : Bool
+  /// `(raw MoonBit name, Python class name)` for every error type this module
+  /// defines. The guest names a failure by its fully qualified MoonBit name, so
+  /// the module has to publish the mapping at import time or the runtime cannot
+  /// raise anything more specific than `MoonError`.
+  errors : Array[(String, String)]
   mut type_count : Int32
   mut func_count : Int32
   mut field_count : Int32
@@ -284,6 +290,11 @@ fn track_typing(used : Map[String, Bool], ty : @map.PyType) -> Unit {
       track_typing(used, v)
     }
     @map.PyTuple(items) => items.each(fn(t) { track_typing(used, t) })
+    @map.PyCallable(params, ret) => {
+      used.set("Callable", true)
+      params.each(fn(t) { track_typing(used, t) })
+      track_typing(used, ret)
+    }
     @map.PyHandle(_, args) => args.each(fn(t) { track_typing(used, t) })
     _ => ()
   }
@@ -401,6 +412,10 @@ fn Emitter::note_vars(self : Emitter, ty : @map.PyType) -> Unit {
     }
     @map.PyTuple(items) | @map.PyHandle(_, items) =>
       items.each(fn(t) { self.note_vars(t) })
+    @map.PyCallable(params, ret) => {
+      params.each(fn(t) { self.note_vars(t) })
+      self.note_vars(ret)
+    }
     _ => ()
   }
 }
@@ -616,7 +631,7 @@ fn Emitter::finish(
       let call = "_runtime.default().request(\"" +
         symbol +
         "\", [" +
-        join(sig.names, ", ") +
+        join(self.call_args(symbol, sig.names), ", ") +
         "])"
       let body : Array[String] = []
       match ret {
@@ -912,6 +927,40 @@ fn Emitter::has_symbol(self : Emitter, symbol : String) -> Bool {
 }
 
 ///|
+/// The argument list a bound function sends, one expression per parameter.
+///
+/// Almost every value crosses as itself — a `list`, a `dict`, an `int` — but a
+/// callable cannot: the guest holds an `Int32` id and asks the host to run it,
+/// so the id has to be minted here, at the one place a Python function is in
+/// hand.
+fn Emitter::call_args(
+  self : Emitter,
+  symbol : String,
+  names : Array[String],
+) -> Array[String] {
+  let wires = match self.plan {
+    Some(p) =>
+      match p.lookup(symbol) {
+        Some(sym) => sym.params
+        None => []
+      }
+    None => []
+  }
+  let out : Array[String] = []
+  let mut i = 0
+  for name in names {
+    let wire = if i < wires.length() { Some(wires[i]) } else { None }
+    match wire {
+      Some(WCall(_, _)) =>
+        out.push("_runtime.default().callback_id(" + name + ")")
+      _ => out.push(name)
+    }
+    i = i + 1
+  }
+  out
+}
+
+///|
 /// The handle-table tag for a type declared by this package, or 0 when the
 /// guest never holds one.
 fn Emitter::tag_of_type(self : Emitter, raw : String) -> Int32 {
@@ -1042,6 +1091,12 @@ fn Emitter::render_enum(
   }
   self.type_count = self.type_count + 1
   let is_error = kind == "suberror"
+  if is_error && self.output == Bind {
+    // The class is what a caller catches; the qualified MoonBit name is what
+    // the guest puts in a failure frame. Registering the pair here is the only
+    // place both are known at once.
+    self.errors.push((raw_name, name))
+  }
   let scoped = self.mapper.for_decl(generics, Some(name))
   let members : Array[String] = []
   match self.tag_member(raw_name) {
@@ -1286,7 +1341,8 @@ fn Emitter::assemble(self : Emitter) -> String {
   let typing_names : Array[String] = []
   for
     name in [
-      "Any", "Generic", "Optional", "Protocol", "Sequence", "TYPE_CHECKING", "TypeAlias",
+      "Any", "Callable", "Generic", "Optional", "Protocol", "Sequence", "TYPE_CHECKING",
+      "TypeAlias",
     ] {
     if self.typing_used.contains(name) {
       typing_names.push(name)
@@ -1356,6 +1412,30 @@ fn Emitter::assemble(self : Emitter) -> String {
   for block in self.blocks {
     sb.write_string("\n\n")
     sb.write_string(block)
+  }
+  if self.output == Bind && self.errors.length() > 0 {
+    // Sorted so that regenerating an unchanged package produces identical
+    // bytes, and after the classes so every name exists when it runs.
+    let lines : Array[String] = []
+    for entry in self.errors {
+      lines.push(
+        "_runtime.register_failure(\"" +
+        self.pkg_name +
+        "::" +
+        entry.0 +
+        "\", " +
+        entry.1 +
+        ")\n",
+      )
+    }
+    lines.sort()
+    sb.write_string(
+      "\n\n# A MoonBit `suberror` arrives as a name and a message; this is what turns\n" +
+      "# the name back into the class a caller wrote `except` for.\n",
+    )
+    for line in lines {
+      sb.write_string(line)
+    }
   }
   sb.write_string("\n")
   sb.to_string()

@@ -107,6 +107,19 @@ pub fn render_codec() -> String {
     #|    return bytes(out)
     #|
     #|
+    #|def dump_status_ok(value: object) -> bytes:
+    #|    """Encodes a successful response frame around one value.
+    #|
+    #|    Used by the callback channel: the guest reads a callback's answer with
+    #|    the same decoder it uses for a call's answer, so the answer has to be a
+    #|    frame and not a bare value.
+    #|    """
+    #|    out = bytearray()
+    #|    out.append(STATUS_OK)
+    #|    _dump(value, out)
+    #|    return bytes(out)
+    #|
+    #|
     #|def _dump(value: object, out: bytearray) -> None:
     #|    if value is None:
     #|        out.append(TAG_NULL)
@@ -308,6 +321,43 @@ pub fn render_runtime() -> String {
     #|    """A handle was used after it was released, or no runtime is configured."""
     #|
     #|
+    #|#: Qualified MoonBit error name -> the generated class that stands for it.
+    #|#:
+    #|#: The guest has no idea what a Python class is, so a failure carries the
+    #|#: MoonBit name of the error and this table is what turns it back into the
+    #|#: class a caller wrote `except` for.
+    #|_FAILURES: dict[str, type[MoonError]] = {}
+    #|
+    #|
+    #|def register_failure(name: str, cls: type[MoonError]) -> None:
+    #|    """Publishes the class a failure named `name` has to be raised as.
+    #|
+    #|    Called once per `suberror` by the generated module that declares it, at
+    #|    import time. A name nobody registered still fails, as a plain
+    #|    `MoonError`: an error from a package whose module was never imported is
+    #|    still an error, just one there is no specific class for.
+    #|    """
+    #|    _FAILURES[name] = cls
+    #|
+    #|
+    #|def failure(value: object) -> MoonError:
+    #|    """Builds the exception a failure frame describes.
+    #|
+    #|    Two shapes arrive here. A guest that knows the error's type sends a map
+    #|    with `type` and `message`; one that does not — an older guest, or a
+    #|    `raise` with no named error — sends the message alone.
+    #|    """
+    #|    if isinstance(value, dict):
+    #|        kind = value.get("type")
+    #|        message = value.get("message")
+    #|        if isinstance(kind, str) and isinstance(message, str):
+    #|            cls = _FAILURES.get(kind)
+    #|            if cls is not None:
+    #|                return cls(message)
+    #|            return MoonError(message)
+    #|    return MoonError(str(value))
+    #|
+    #|
     #|class MoonObject:
     #|    """Base class of every generated handle type.
     #|
@@ -411,6 +461,14 @@ pub fn render_runtime() -> String {
     #|        self._closed = False
     #|        #: Frames sent, for a caller that wants to see the boundary's cost.
     #|        self.calls = 0
+    #|        #: Python callables the guest can call back into, by id.
+    #|        #:
+    #|        #: A MoonBit function value cannot travel: the guest holds an `Int32`
+    #|        #: and asks the host to run it. The table is keyed by the id in that
+    #|        #: integer and lives as long as the runtime, because a callback may
+    #|        #: be stored by the guest and called after the call that passed it.
+    #|        self._callbacks: dict[int, Callable[..., Any]] = {}
+    #|        self._callback_id: dict[int, int] = {}
     #|        #: Handles released, so a leak test can compare against what it made.
     #|        self.releases = 0
     #|        #: Ids the guest did not recognise. A batch reports how many it
@@ -428,8 +486,33 @@ pub fn render_runtime() -> String {
     #|        if status == _codec.STATUS_OK:
     #|            return value
     #|        if status == _codec.STATUS_FAILED:
-    #|            raise MoonError(str(value))
+    #|            raise failure(value)
     #|        raise MoonPanic(str(value))
+    #|
+    #|    def callback_id(self, fn: Callable[..., Any]) -> int:
+    #|        """Interns a Python callable and returns the id the guest will hold.
+    #|
+    #|        Interning matters: the same function passed twice has to be the same
+    #|        MoonBit value on the other side, because the guest compares and
+    #|        stores callbacks like any other value.
+    #|        """
+    #|        key = id(fn)
+    #|        found = self._callback_id.get(key)
+    #|        if found is not None:
+    #|            return found
+    #|        assigned = len(self._callback_id) + 1
+    #|        self._callback_id[key] = assigned
+    #|        # Keep the callable alive as long as its id can be used: the guest may
+    #|        # have stored it, and a collected function cannot be called.
+    #|        self._callbacks[assigned] = fn
+    #|        return assigned
+    #|
+    #|    def invoke(self, cb_id: int, args: list[object]) -> Any:
+    #|        """Runs a callback the guest asked for."""
+    #|        fn = self._callbacks.get(cb_id)
+    #|        if fn is None:
+    #|            raise MoonStateError(f"callback {cb_id} is not registered")
+    #|        return fn(*args)
     #|
     #|    def deferred_release(self, handle: int, type_id: int = 0) -> None:
     #|        """Queues a handle whose Python wrapper was collected."""
@@ -528,6 +611,7 @@ pub fn render_host() -> String {
     #|
     #|import wasmtime
     #|
+    #|from . import _codec
     #|from . import _runtime
     #|
     #|__all__ = ["WasmHost", "open_runtime"]
@@ -550,7 +634,24 @@ pub fn render_host() -> String {
     #|        engine = wasmtime.Engine(wasmtime.Config())
     #|        module = wasmtime.Module.from_file(engine, str(wasm))
     #|        self._store = wasmtime.Store(engine)
-    #|        self._instance = wasmtime.Instance(self._store, module, [])
+    #|        self._runtime: _runtime.Runtime | None = None
+    #|        #: An exception raised by a callback, held until the outer call
+    #|        #: returns. It cannot be raised where it happens: the guest is on the
+    #|        #: stack, and unwinding through it would leave its buffers half
+    #|        #: written.
+    #|        self._callback_error: BaseException | None = None
+    #|        # The guest imports one host function, for the callback channel. It is
+    #|        # linked even when the module does not import it: a linker tolerates
+    #|        # an unused definition and rejects a missing one.
+    #|        linker = wasmtime.Linker(engine)
+    #|        callback_type = wasmtime.FuncType(
+    #|            [wasmtime.ValType.i32(), wasmtime.ValType.i32()],
+    #|            [wasmtime.ValType.i32()],
+    #|        )
+    #|        linker.define_func(
+    #|            "env", "mb_cb_invoke", callback_type, self._invoke_callback
+    #|        )
+    #|        self._instance = linker.instantiate(self._store, module)
     #|        exports = self._instance.exports(self._store)
     #|        memory = exports["memory"]
     #|        if not isinstance(memory, wasmtime.Memory):
@@ -564,6 +665,13 @@ pub fn render_host() -> String {
     #|        self._live: Any = exports["mb_live_handles"]
     #|        self._probe: Any = exports["mb_probe"]
     #|        self._probe_out: Any = exports["mb_probe_out"]
+    #|        # Ask for the guest-owned buffer a callback's answer is written into.
+    #|        # A module with no callback in its plan does not export it, and the
+    #|        # import is then never called either.
+    #|        try:
+    #|            self._cb_buffer: Any = exports["mb_cb_buffer"]
+    #|        except KeyError:
+    #|            self._cb_buffer = None
     #|        # The input buffer is a `Bytes` and the response buffer is a
     #|        # `FixedArray[Byte]`; the two layouts are not promised to match, so
     #|        # each is measured rather than assumed.
@@ -573,6 +681,10 @@ pub fn render_host() -> String {
     #|        self._in_capacity = 0
     #|        self._out_ptr = 0
     #|        self._out_capacity = 0
+    #|
+    #|    def attach(self, runtime: _runtime.Runtime) -> None:
+    #|        """Points the callback import at the runtime that owns the table."""
+    #|        self._runtime = runtime
     #|
     #|    def _find_data_offset(self, probe: Any, what: str) -> int:
     #|        pointer = int(probe(self._store))
@@ -610,9 +722,45 @@ pub fn render_host() -> String {
     #|        self._ensure_input(len(frame))
     #|        self._memory.write(self._store, frame, self._in_ptr + self._in_offset)
     #|        length = int(self._call(self._store, len(frame)))
+    #|        # A callback that raised could not unwind through the guest, so it is
+    #|        # re-raised here, where the guest is no longer on the stack.
+    #|        if self._callback_error is not None:
+    #|            error = self._callback_error
+    #|            self._callback_error = None
+    #|            raise error
     #|        self._ensure_output(length)
     #|        base = self._out_ptr + self._out_offset
     #|        return bytes(self._memory.read(self._store, base, base + length))
+    #|
+    #|    def _invoke_callback(self, cb_id: int, sent: int) -> int:
+    #|        """The host half of the callback channel.
+    #|
+    #|        The guest published the call's arguments into the response buffer
+    #|        before calling, so they are read from where a response normally is.
+    #|        The answer is written into a buffer the guest owns — the host cannot
+    #|        allocate in the guest's heap, so it asks the guest for the memory and
+    #|        writes into that.
+    #|
+    #|        Returns the number of bytes written, or `0` for "no value": the guest
+    #|        substitutes a default and the exception is re-raised from `call`.
+    #|        """
+    #|        if sent <= 0 or self._cb_buffer is None or self._runtime is None:
+    #|            return 0
+    #|        self._ensure_output(sent)
+    #|        base = self._out_ptr + self._out_offset
+    #|        frame = bytes(self._memory.read(self._store, base, base + sent))
+    #|        try:
+    #|            args = _codec.load(frame)
+    #|            result = self._runtime.invoke(int(cb_id), args)
+    #|            answer = _codec.dump_status_ok(result)
+    #|        except BaseException as error:  # noqa: BLE001 - carried, not swallowed
+    #|            self._callback_error = error
+    #|            return 0
+    #|        # `mb_cb_buffer` returns a `Bytes`, whose payload sits at the same
+    #|        # offset the input buffer's does: both are the same MoonBit type.
+    #|        pointer = int(self._cb_buffer(self._store, len(answer)))
+    #|        self._memory.write(self._store, answer, pointer + self._in_offset)
+    #|        return len(answer)
     #|
     #|    def live_handles(self) -> int:
     #|        """Objects the guest still holds, without going through the codec."""
@@ -635,7 +783,9 @@ pub fn render_host() -> String {
     #|def open_runtime(wasm: str | Path) -> tuple[WasmHost, _runtime.Runtime]:
     #|    """Loads a guest and returns it with a runtime pointed at it."""
     #|    host = WasmHost(wasm)
-    #|    return host, _runtime.Runtime(host.call)
+    #|    runtime = _runtime.Runtime(host.call)
+    #|    host.attach(runtime)
+    #|    return host, runtime
     #|
   text
 }
