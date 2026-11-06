@@ -14,6 +14,18 @@
 //! contains.
 
 ///|
+/// What kind of file is being rendered.
+///
+/// A stub is a promise; a module is the thing that keeps it. Both come from the
+/// same walk over the same interface, so their signatures cannot disagree.
+pub(all) enum Output {
+  /// `.pyi`: signatures only, checked by the type checker.
+  Stub
+  /// `.py`: the same signatures with a body that calls the guest.
+  Bind
+} derive(Debug, Eq)
+
+///|
 /// Knobs the generator needs; kept in a struct so tests can pin the import
 /// path without touching production text.
 pub(all) struct GenOptions {
@@ -76,12 +88,38 @@ pub fn generate_with(
   pkg : @mbti.Package,
   opts : GenOptions,
 ) -> Stub {
+  render(world, pkg, opts, Stub)
+}
+
+///|
+/// Renders the callable module for one package.
+///
+/// Same declarations, same symbols, same annotations as the stub, with bodies
+/// that encode the arguments, call the guest, and decode the answer. A module
+/// is only worth generating for a package whose guest is actually compiled,
+/// which is why this is a separate entry point rather than the default.
+pub fn bind_with(
+  world : @map.World?,
+  pkg : @mbti.Package,
+  opts : GenOptions,
+) -> Stub {
+  render(world, pkg, opts, Bind)
+}
+
+///|
+fn render(
+  world : @map.World?,
+  pkg : @mbti.Package,
+  opts : GenOptions,
+  output : Output,
+) -> Stub {
   let mapper = match world {
     Some(w) => @map.Mapper::for_world(w, pkg.name, None)
     None => @map.Mapper::for_package(pkg)
   }
   let em : Emitter = {
     opts,
+    output,
     pkg_name: pkg.name,
     world,
     mapper,
@@ -127,7 +165,10 @@ pub fn generate_with(
   let text = em.assemble()
   {
     module_name: @map.module_stem(pkg.name),
-    filename: @map.stub_filename(pkg.name),
+    filename: match output {
+      Stub => @map.stub_filename(pkg.name)
+      Bind => @map.module_stem(pkg.name) + ".py"
+    },
     text,
     types: em.type_count,
     funcs: em.func_count,
@@ -143,6 +184,7 @@ pub fn generate_with(
 /// knowing which typing helpers ended up in its annotations.
 priv struct Emitter {
   opts : GenOptions
+  output : Output
   pkg_name : String
   world : @map.World?
   mapper : @map.Mapper
@@ -301,7 +343,7 @@ fn Emitter::decl(self : Emitter, decl : @mbti.Decl) -> Unit {
         // class in this package has no place to live.
         Some(_) => ()
         None =>
-          match self.render_func(f, None, None, self.mapper) {
+          match self.render_func(f, None, None, self.pkg_name, None, self.mapper) {
             Some(block) => {
               self.blocks.push(block)
               self.func_count = self.func_count + 1
@@ -366,12 +408,20 @@ fn Emitter::class_header(
   include_base : Bool,
 ) -> String {
   let all : Array[String] = []
+  // A stub is checked against `from moonbridge._runtime import MoonObject`, a
+  // module is executed and reaches the same names through `from . import
+  // _runtime`. Both spell the base class the same way to the reader; only the
+  // import differs.
+  let prefix = match self.output {
+    Stub => ""
+    Bind => "_runtime."
+  }
   if is_error {
     self.need_error = true
-    all.push(self.opts.error_base)
+    all.push(prefix + self.opts.error_base)
   } else if include_base {
     self.need_base = true
-    all.push(self.opts.base_class)
+    all.push(prefix + self.opts.base_class)
   }
   for b in bases {
     all.push(b)
@@ -404,8 +454,16 @@ fn body_of(doc : String, members : Array[String]) -> String {
 }
 
 ///|
-/// Renders `def name(<params>) -> <ret>: ...` with the mapping context already
-/// scoped to the declaring type.
+/// A rendered signature plus the parameter names it bound, so the runtime
+/// renderer can pass them on without re-parsing its own output.
+priv struct Sig {
+  text : String
+  names : Array[String]
+}
+
+///|
+/// Renders `def name(<params>) -> <ret>`, without the trailing colon: the stub
+/// appends `: ...` and the runtime module appends a body.
 fn Emitter::signature(
   self : Emitter,
   name : String,
@@ -414,7 +472,7 @@ fn Emitter::signature(
   fn_generics : Array[@mbti.GenericParam],
   params : Array[@mbti.Param],
   ret : @map.PyType,
-) -> String {
+) -> Sig {
   let used : Map[String, Bool] = Map([])
   if is_method {
     used.set("self", true)
@@ -457,8 +515,13 @@ fn Emitter::signature(
   self.note_type(ret_ty)
   let pos : Array[String] = []
   let kw : Array[String] = []
+  let all_names : Array[String] = []
   if is_method {
     pos.push("self")
+    all_names.push("self")
+  }
+  for n in names {
+    all_names.push(n)
   }
   let mut i = 0
   while i < types.length() {
@@ -472,7 +535,14 @@ fn Emitter::signature(
             "Optional[" + types[i].render() + "]"
           }
         }
-        kw.push(names[i] + ": " + ann + " = ...")
+        // In a stub `= ...` reads as "some default exists". Executed, it would
+        // be a default of `Ellipsis`, which the codec cannot encode, so the
+        // module spells the only value MoonBit's `?` can represent.
+        let default = match self.output {
+          Stub => "..."
+          Bind => "None"
+        }
+        kw.push(names[i] + ": " + ann + " = " + default)
       }
       @mbti.Labeled => kw.push(names[i] + ": " + types[i].render())
     }
@@ -492,8 +562,78 @@ fn Emitter::signature(
     sb.write_string("*")
     sb.write_string(", " + join(kw, ", "))
   }
-  sb.write_string(") -> " + ret_ty.render() + ": ...")
-  sb.to_string()
+  sb.write_string(") -> " + ret_ty.render())
+  { text: sb.to_string(), names: all_names }
+}
+
+///|
+/// The import line that makes a module-qualified class available, or `None`
+/// when the name is local.
+///
+/// A module reference is spelled `_<stem>.<Class>` by the mapper, so the module
+/// alias and the module name are one substitution apart.
+fn sibling_import(name : String) -> String? {
+  let parts = name.split(".").to_array()
+  if parts.length() != 2 {
+    return None
+  }
+  let module_name = parts[0].to_owned()
+  if module_name.length() == 0 || module_name[0] != '_' {
+    return None
+  }
+  Some(
+    "from . import " +
+    module_name.exact_view(start=1).to_owned() +
+    " as " +
+    module_name,
+  )
+}
+
+///|
+/// Closes a signature: a stub gets `...`, a runtime module gets a body that
+/// calls the guest.
+fn Emitter::finish(
+  self : Emitter,
+  sig : Sig,
+  symbol : String,
+  ret : @map.PyType,
+  indent : String,
+) -> String {
+  match self.output {
+    Stub => sig.text + ": ..."
+    Bind => {
+      let call = "_runtime.default().request(\"" +
+        symbol +
+        "\", [" +
+        join(sig.names, ", ") +
+        "])"
+      let body : Array[String] = []
+      match ret {
+        // A `Unit` return must not be `return <Any>`, which a strict checker
+        // rejects in a function declared `-> None`.
+        @map.PyNone => {
+          body.push(call)
+          body.push("return None")
+        }
+        @map.PyHandle(name, _) => {
+          // The class may live in a module that is still importing this one,
+          // so it is fetched at call time rather than bound at import time.
+          match sibling_import(name) {
+            Some(line) => body.push(line)
+            None => ()
+          }
+          body.push("return _runtime.wrap(" + name + ", " + call + ")")
+        }
+        _ => body.push("return " + call)
+      }
+      let sb = StringBuilder()
+      sb.write_string(sig.text + ":")
+      for line in body {
+        sb.write_string("\n" + indent + line)
+      }
+      sb.to_string()
+    }
+  }
 }
 
 ///|
@@ -501,6 +641,8 @@ fn Emitter::render_func(
   self : Emitter,
   f : @mbti.FuncDecl,
   owner : String?,
+  owner_raw : String?,
+  decl_pkg : String,
   forced : String?,
   base : @map.Mapper,
 ) -> String? {
@@ -518,13 +660,23 @@ fn Emitter::render_func(
         Some(n) => n
         None => member_name(f, owner_name)
       }
-      let rendered = self.signature(
+      let sig = self.signature(
         name,
         has_receiver,
         scoped,
         f.generics,
         params,
         ret,
+      )
+      let raw = match owner_raw {
+        Some(r) => r
+        None => owner_name
+      }
+      let rendered = self.finish(
+        sig,
+        decl_pkg + "::" + raw + "::" + f.name,
+        ret,
+        "        ",
       )
       if has_receiver {
         Some("    " + rendered)
@@ -540,7 +692,10 @@ fn Emitter::render_func(
         None => @map.stub_name(f.name)
       }
       if self.claim(name) {
-        Some(self.signature(name, false, scoped, f.generics, f.params, ret))
+        let sig = self.signature(name, false, scoped, f.generics, f.params, ret)
+        Some(
+          self.finish(sig, self.pkg_name + "::" + f.name, ret, "    "),
+        )
       } else {
         None
       }
@@ -581,7 +736,7 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
   // A struct with hidden fields cannot be constructed from Python: the stub
   // still exposes the public fields, but offers no `__init__` that would
   // promise construction is possible.
-  if s.access == @mbti.Open && !s.has_hidden_fields {
+  if s.access == @mbti.Open && !s.has_hidden_fields && self.output == Stub {
     let ctor_params : Array[String] = ["self"]
     let mut i = 0
     while i < visible.length() {
@@ -600,19 +755,25 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
     let ty = scoped.map(f.ty)
     self.note_type(ty)
     self.field_count = self.field_count + 1
-    members.push("    @property")
-    members.push(
-      "    def " + field_names[i] + "(self) -> " + ty.render() + ": ...",
-    )
-    if f.is_mut {
-      members.push("    @" + field_names[i] + ".setter")
+    // Field access needs a getter the guest exports; until the MoonBit half of
+    // that exists, the module stays silent rather than raising at the call
+    // site. The annotations above are still recorded, so the stub keeps the
+    // full picture.
+    if self.output == Stub {
+      members.push("    @property")
       members.push(
-        "    def " +
-        field_names[i] +
-        "(self, value: " +
-        ty.render() +
-        ") -> None: ...",
+        "    def " + field_names[i] + "(self) -> " + ty.render() + ": ...",
       )
+      if f.is_mut {
+        members.push("    @" + field_names[i] + ".setter")
+        members.push(
+          "    def " +
+          field_names[i] +
+          "(self, value: " +
+          ty.render() +
+          ") -> None: ...",
+        )
+      }
     }
     i = i + 1
   }
@@ -695,6 +856,8 @@ fn Emitter::attach_methods(
       self.render_func(
         f,
         Some(class_name),
+        Some(raw_name),
+        decl_pkg,
         Some(name),
         self.method_mapper(decl_pkg),
       ) {
@@ -724,7 +887,7 @@ fn Emitter::render_enum(
   let is_error = kind == "suberror"
   let scoped = self.mapper.for_decl(generics, Some(name))
   let members : Array[String] = []
-  if ctors.length() == 1 && ctors[0].fields.length() > 0 {
+  if self.output == Stub && ctors.length() == 1 && ctors[0].fields.length() > 0 {
     let ctor_params : Array[String] = ["self"]
     let mut index = 0
     for f in ctors[0].fields {
@@ -745,13 +908,13 @@ fn Emitter::render_enum(
     members.push(
       "    def __init__(" + join(ctor_params, ", ") + ") -> None: ...",
     )
-  } else if ctors.length() > 1 || is_error {
+  } else if self.output == Stub && (ctors.length() > 1 || is_error) {
     // Several payload shapes cannot be described by one signature; the tag
     // plus an open payload is the honest common denominator.
     self.typing_used.set("Any", true)
     members.push("    def __init__(self, tag: str, *args: Any) -> None: ...")
   }
-  if ctors.length() > 0 {
+  if self.output == Stub && ctors.length() > 0 {
     members.push("    @property")
     members.push("    def tag(self) -> str: ...")
   }
@@ -791,6 +954,8 @@ fn Emitter::render_trait(self : Emitter, t : @mbti.TraitDecl) -> String? {
     )
     let ret = scoped.map(m.ret)
     self.note_type(ret)
+    // A trait is a typing construct in both outputs: there is no guest object
+    // to dispatch to.
     members.push(
       "    " +
       self.signature(
@@ -800,7 +965,8 @@ fn Emitter::render_trait(self : Emitter, t : @mbti.TraitDecl) -> String? {
         m.generics,
         drop_receiver(m.params),
         ret,
-      ),
+      ).text +
+      ": ...",
     )
   }
   let header = self.class_header(name, t.generics, ["Protocol"], false, false)
@@ -915,16 +1081,46 @@ fn concat_generics(
 /// Assembles the final file: docstring, imports, type variables, body.
 fn Emitter::assemble(self : Emitter) -> String {
   let sb = StringBuilder()
-  sb.write_string(
-    "\"\"\"Type stubs for the MoonBit package `" +
-    self.pkg_name +
-    "`.\n\n" +
-    "Generated by MoonBridge from `pkg.generated.mbti`. Do not edit by hand.\n" +
-    "\"\"\"\n",
-  )
+  match self.output {
+    Stub =>
+      sb.write_string(
+        "\"\"\"Type stubs for the MoonBit package `" +
+        self.pkg_name +
+        "`.\n\n" +
+        "Generated by MoonBridge from `pkg.generated.mbti`. Do not edit by hand.\n" +
+        "\"\"\"\n",
+      )
+    Bind =>
+      sb.write_string(
+        "\"\"\"Bindings that call into the MoonBit package `" +
+        self.pkg_name +
+        "`.\n\n" +
+        "Generated by MoonBridge from `pkg.generated.mbti`. Do not edit by hand.\n\n" +
+        "Every function here forwards to the guest as one frame; the signature is\n" +
+        "the one the stub declares, so the type checker and the call agree by\n" +
+        "construction. Fields and constructors are declared in the stub but not\n" +
+        "bound here: reading a field and calling a constructor both need a symbol\n" +
+        "the guest has to export, and a body that invented one would fail at the\n" +
+        "call site instead of at generation time.\n" +
+        "\"\"\"\n",
+      )
+  }
+  if self.output == Bind {
+    // Annotations must not be evaluated at definition time: a module may
+    // reference a class from a module that is still importing us.
+    sb.write_string("\nfrom __future__ import annotations\n")
+  }
+  let relative = self.mapper.imports()
+  if self.output == Bind && relative.length() > 0 {
+    // A sibling may only have a stub, and importing it eagerly would fail at
+    // import time in a package the guest does not back. Annotations are
+    // strings here, so the type checker needs the name and the interpreter
+    // does not.
+    self.typing_used.set("TYPE_CHECKING", true)
+  }
   let typing_names : Array[String] = []
   for
-    name in ["Any", "Generic", "Optional", "Protocol", "Sequence", "TypeAlias"] {
+    name in ["Any", "Generic", "Optional", "Protocol", "Sequence", "TYPE_CHECKING", "TypeAlias"] {
     if self.typing_used.contains(name) {
       typing_names.push(name)
     }
@@ -935,13 +1131,26 @@ fn Emitter::assemble(self : Emitter) -> String {
   if typing_names.length() > 0 {
     sb.write_string("\nfrom typing import " + join(typing_names, ", ") + "\n")
   }
+  // The module is executed inside the generated package, so the runtime it
+  // calls is a sibling; the stub names the same file by its installed path,
+  // because a stub is read outside any package context.
+  if self.output == Bind {
+    sb.write_string("\nfrom . import _runtime\n")
+  }
   let relative = self.mapper.imports()
   if relative.length() > 0 {
-    sb.write_string("\n")
-    for stem in relative {
-      // `_` plus the stem cannot collide with a generated class name, and one
-      // alias per module keeps two packages' `Point` apart.
-      sb.write_string("from . import " + stem + " as _" + stem + "\n")
+    if self.output == Bind {
+      sb.write_string("\nif TYPE_CHECKING:\n")
+      for stem in relative {
+        sb.write_string("    from . import " + stem + " as _" + stem + "\n")
+      }
+    } else {
+      sb.write_string("\n")
+      for stem in relative {
+        // `_` plus the stem cannot collide with a generated class name, and one
+        // alias per module keeps two packages' `Point` apart.
+        sb.write_string("from . import " + stem + " as _" + stem + "\n")
+      }
     }
   }
   let runtime : Array[String] = []
@@ -958,7 +1167,7 @@ fn Emitter::assemble(self : Emitter) -> String {
     runtime[0] = runtime[1]
     runtime[1] = first
   }
-  if runtime.length() > 0 {
+  if runtime.length() > 0 && self.output == Stub {
     sb.write_string(
       "\nfrom " +
       self.opts.runtime_module +

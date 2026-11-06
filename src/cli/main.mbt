@@ -152,14 +152,20 @@ fn GenTally::new() -> GenTally {
 /// stub can only reference a neighbour whose declaration is already known: the
 /// world is built from every package first, then each stub is rendered against
 /// it.
-fn run_gen(files : Array[String], out_dir : String) -> Int32 {
+fn run_gen(files : Array[String], out_dir : String, bind : Array[String]) -> Int32 {
   let pkg_dir = out_dir + "/moonbridge"
   if !make_dir(pkg_dir) {
     println("error: cannot create " + pkg_dir)
     return 1
   }
   ignore(write_text_file(pkg_dir + "/__init__.py", @gen.render_init()))
-  ignore(write_text_file(pkg_dir + "/_runtime.py", @gen.render_runtime()))
+  ignore(
+    write_text_file(pkg_dir + "/" + @gen.runtime_filename(), @gen.render_runtime()),
+  )
+  ignore(
+    write_text_file(pkg_dir + "/" + @gen.codec_filename(), @gen.render_codec()),
+  )
+  ignore(write_text_file(pkg_dir + "/" + @gen.host_filename(), @gen.render_host()))
   ignore(write_text_file(pkg_dir + "/py.typed", ""))
   let tally = GenTally::new()
   let pkgs : Array[@mbti.Package] = []
@@ -229,10 +235,41 @@ fn run_gen(files : Array[String], out_dir : String) -> Int32 {
       }
     }
   }
+  // A callable module is opt-in because it is only meaningful for a package
+  // whose guest is actually compiled: the other 490 stubs describe an API that
+  // no wasm build answers yet.
+  let mut bound = 0
+  for target in bind {
+    let mut found : @mbti.Package? = None
+    for pkg in pkgs {
+      if pkg.name == target {
+        found = Some(pkg)
+      }
+    }
+    match found {
+      Some(pkg) => {
+        let module_ = @gen.bind_with(
+          Some(world),
+          pkg,
+          @gen.GenOptions::standard(),
+        )
+        if write_text_file(pkg_dir + "/" + module_.filename, module_.text) {
+          bound = bound + 1
+          println("bind " + pkg.name + " -> " + module_.filename)
+        } else {
+          tally.failed = tally.failed + 1
+          println("FAIL " + pkg.name + ": cannot write " + module_.filename)
+        }
+      }
+      None => {
+        tally.failed = tally.failed + 1
+        println("FAIL --bind " + target + ": not among the input interfaces")
+      }
+    }
+  }
   println("")
   println(
-    "stubs=" +
-    tally.stubs.to_string() +
+    "stubs=" + tally.stubs.to_string() +
     " failed=" +
     tally.failed.to_string() +
     " types=" +
@@ -250,6 +287,9 @@ fn run_gen(files : Array[String], out_dir : String) -> Int32 {
     " edges=" +
     tally.imports.to_string(),
   )
+  if bind.length() > 0 {
+    println("bind: modules=" + bound.to_string() + " of " + bind.length().to_string())
+  }
   println(
     "degraded: foreign=" +
     tally.foreign.to_string() +
@@ -277,6 +317,7 @@ fn main {
   let mut quiet = false
   let mut want_graph = false
   let mut gen_dir : String? = None
+  let bind : Array[String] = []
   let files : Array[String] = []
   let mut i = 2 // argv[0] is the node binary, argv[1] is this script
   while i < args.length() {
@@ -291,6 +332,15 @@ fn main {
       // Generate Python stubs instead of reporting parse statistics.
       i = i + 1
       gen_dir = Some(args[i])
+    } else if arg == "--bind" && i + 1 < args.length() {
+      // Emit a callable `.py` next to the `.pyi` for this package. Repeatable.
+      i = i + 1
+      for target in args[i].split(",") {
+        let name = target.trim().to_owned()
+        if name.length() > 0 {
+          bind.push(name)
+        }
+      }
     } else if arg == "--list" && i + 1 < args.length() {
       // A manifest of paths, one per line: large corpora overflow argv.
       i = i + 1
@@ -314,7 +364,7 @@ fn main {
   }
   match gen_dir {
     Some(dir) => {
-      let failures = run_gen(files, dir)
+      let failures = run_gen(files, dir, bind)
       if failures > 0 {
         set_exit_code(1)
       }
