@@ -14,13 +14,15 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
                                             wasm 模块 / native 库
 ```
 
-> 状态：**S0 通过、S1 通过、S2 通过**（2026-11-06）。
+> 状态：**S0 通过、S1 通过、S2 通过、S3 通过**（2026-11-06）。
 > S0：调用 ABI、内存共享、宿主↔MoonBit 字节流、UTF-8 往返全部跑通，实测见
 > [spikes/01-wasm-python](spikes/01-wasm-python/)。
 > S1：`.mbti` 解析器 + 类型图，在 **501 个真实接口文件 / 17,793 条声明**上 100% 通过，
 > 见 [S1 语料报告](docs/s1-corpus-report.md)。
 > S2：类型映射 + Python 代码生成，**501 个包生成 stub，`mypy --strict` 0 报错**，
 > 见 [S2 映射与生成](docs/s2-type-mapping.md)。
+> S3：跨包句柄与生命周期，**真实 json 包端到端跑通，10 万次调用 0 泄漏、guest 内存逐字节不变**，
+> 见 [S3 运行时](docs/s3-runtime.md)。
 
 ---
 
@@ -122,10 +124,44 @@ stubs=501 failed=0 types=1937 funcs=4789 fields=3733 skipped=7
 degraded: foreign=4812 unknown=890 result=130 higher-order=699 arity=0 async=81
 ```
 
+（S2 当时的数字。S3 引入世界索引后 `foreign` 降到 605、`unknown` 降到 255。）
+
 两处刻意的选择：函数类型降级为 `Any` 而**不是** `Callable`（没有回调蹦床，写 `Callable`
 等于承诺一条走不通的路）；stub 之间**互不 import**（MoonBit 包图含 48 个环，跨包类型走 `Any`，
 保证每个 `.pyi` 独立可检查）。完整映射表、命名规则、以及 mypy 逼出来的六类问题见
 [S2 映射与生成](docs/s2-type-mapping.md)。
+
+## S3：跨包句柄与运行时
+
+前两段产出的是一份"说得对"的接口。这一段让它能真的调起来：跨包导入补上、句柄表跑起来、
+wasmtime 接进来，然后拿真实的 `moonbitlang/core/json` 验一遍。
+
+```text
+.mbti ──▶ stub(.pyi)   类型检查器读的那一份
+     └──▶ module(.py)  解释器执行的那一份   ┐
+                                            ├─ 同一次遍历，签名不可能与函数体不符
+     世界索引 ──▶ from . import <stem>       ┘
+                                            │
+     Python 对象 ──handle id──▶ 句柄表 ──▶ MoonBit 堆 ──▶ wasm guest
+                    ◀──批量回收 / close() / with──┘
+```
+
+```bash
+# 生成 + 端到端 + 10 万次调用基准，任一泄漏即退出码非 0
+bash scripts/e2e.sh
+```
+
+三个数字说明这一段到底做了什么：
+
+| | S2 | S3 |
+|---|---|---|
+| 跨包类型降级为 `Any` | 4812 处 | **605 处**（剩下的真的不在语料里） |
+| 生成的模块间导入边 | 0 | **566**（276 个模块） |
+| 10 万次调用的 guest 内存 | — | **64 KiB 不变**，句柄表归零 |
+
+基准还抓到了三个都不报错、只体现在曲线上的 bug：0 号句柄被当成"没有对象"（第一份文档永不释放）、
+导出函数的返回值泄漏（41 字节/次）、世代计数器回绕（每 1023 次漏一个）。三个都写进
+[S3 运行时](docs/s3-runtime.md)，包括怎么二分定位的。
 
 ## 开发
 
@@ -141,6 +177,10 @@ bash scripts/corpus.sh all
 
 # 生成 Python stub 并跑 mypy strict
 bash scripts/gen.sh all
+
+# 生成 + 端到端 + 基准（需要 python + wasmtime）
+bash scripts/e2e.sh
+BENCH_CALLS=20000 bash scripts/e2e.sh   # 快速跑一遍
 
 # Spike 复现（需要 Python 3.10+ 与 wasmtime）
 cd spikes/01-wasm-python/module && moon build --target wasm && cd ..
@@ -161,7 +201,8 @@ python bridge_test.py
       （501 个真实接口文件 100% 通过，见 [报告](docs/s1-corpus-report.md)）
 - [x] **S2** 类型映射与代码生成：501 个包生成 `.pyi`，`mypy --strict` 0 报错
       （见 [报告](docs/s2-type-mapping.md)）
-- [ ] **S3** 句柄表与生命周期：`__del__` 回收、环引用、10 万次往返 0 泄漏
+- [x] **S3** 跨包句柄与生命周期：真实 json 包端到端可调，10 万次往返 0 泄漏、内存不涨
+      （见 [报告](docs/s3-runtime.md)）
 - [ ] **S4** 集合 / `Option` / `Result` / 回调 / 异常映射
 - [ ] **S5** PEP 517 打包、真实包端到端、批量协议与基准
 - [ ] **S6** native(C ABI) 后端、CI 矩阵、文档站
