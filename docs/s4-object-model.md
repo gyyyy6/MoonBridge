@@ -9,7 +9,7 @@ S4 把这个缺口补上：**两半从同一份计划投影出来**，并且让�
 bash scripts/e2e.sh   # 语料 → stub → 可调用模块 → 生成的 guest → wasm → Python → 10 万次调用
 ```
 
-2026-11-06 实测：163 个 MoonBit 单测通过；`mypy --strict` 497 个文件 0 报错；26 项端到端断言全绿；
+2026-11-06 实测：163 个 MoonBit 单测通过；`mypy --strict` 497 个文件 0 报错；28 项端到端断言全绿；
 10 万次 × 6 个用例共 1,503,128 帧，guest 内存曲线全程平直（64 / 128 KiB 两档不动），
 `live=0`、`dropped=0`。
 
@@ -53,7 +53,7 @@ guest: symbols=46 (free=2 method=37 ctor=2 get=4 set=1) tables=12
 `receiver-not-in-guest=456` 是这段最诚实的一行：**方法挂在没编译进 guest 的类型上，就真的调不到**。
 把它写成"尽力而为"的分支，只会把失败从生成期推迟到运行期。
 
-生成的 `guest.mbt` 有 1161 行，结构固定：ABI 导出 → 每种参数形状一个解码器 → 每种返回形状一个编码器 →
+生成的 `guest.mbt` 报 1161 行（`moon fmt` 格式化后 1396 行），结构固定：ABI 导出 → 每种参数形状一个解码器 → 每种返回形状一个编码器 →
 `live_total` / `release_tag` / `release_pairs` → `dispatch` → `mb_call`。手写的 `src/guest_json/` 已删除。
 
 编译器逼出来的四处错（都不报错、只在运行期才现形，或者干脆编译不过）：
