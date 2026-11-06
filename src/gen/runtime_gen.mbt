@@ -323,7 +323,7 @@ pub fn render_runtime() -> String {
     #|    safe at that point and cannot resurrect the object.
     #|    """
     #|
-    #|    __slots__ = ("_handle", "_runtime", "_finalizer", "__weakref__")
+    #|    __slots__ = ("_handle", "_runtime", "_finalizer", "_type_id", "__weakref__")
     #|
     #|    _handle: int
     #|    _runtime: Runtime | None
@@ -332,13 +332,23 @@ pub fn render_runtime() -> String {
     #|    # to one typeshed version.
     #|    _finalizer: Any
     #|
+    #|    #: Which of the guest's handle tables holds this object.
+    #|    #:
+    #|    #: The guest keeps one table per concrete type — it has no runtime type
+    #|    #: information, so one table could not hold two types — and an id is only
+    #|    #: unique inside its own table. A generated subclass sets this to the tag
+    #|    #: of its table; 0 means "no table", which is what a class the guest
+    #|    #: cannot hold keeps.
+    #|    moon_type_id: int = 0
+    #|
     #|    def __init__(self, handle: int = 0, runtime: Runtime | None = None) -> None:
     #|        self._handle = handle
     #|        self._runtime = runtime
+    #|        self._type_id = type(self).moon_type_id
     #|        self._finalizer = None
     #|        if runtime is not None and handle != 0:
     #|            self._finalizer = weakref.finalize(
-    #|                self, runtime.deferred_release, handle
+    #|                self, runtime.deferred_release, handle, self._type_id
     #|            )
     #|
     #|    @property
@@ -366,7 +376,7 @@ pub fn render_runtime() -> String {
     #|        self._handle = 0
     #|        runtime = self._runtime
     #|        if runtime is not None:
-    #|            runtime.release_now(handle)
+    #|            runtime.release_now(handle, self._type_id)
     #|
     #|    def __enter__(self) -> MoonObject:
     #|        return self
@@ -396,13 +406,19 @@ pub fn render_runtime() -> String {
     #|        release_batch: int = RELEASE_BATCH,
     #|    ) -> None:
     #|        self._call = call
-    #|        self._pending: list[int] = []
+    #|        self._pending: list[list[int]] = []
     #|        self._release_batch = release_batch
     #|        self._closed = False
     #|        #: Frames sent, for a caller that wants to see the boundary's cost.
     #|        self.calls = 0
     #|        #: Handles released, so a leak test can compare against what it made.
     #|        self.releases = 0
+    #|        #: Ids the guest did not recognise. A batch reports how many it
+    #|        #: released; anything it could not route — an id from a class that
+    #|        #: never got a tag — is a leak, and it is counted rather than
+    #|        #: swallowed because a release that silently does nothing is the one
+    #|        #: failure a leak test must never see.
+    #|        self.dropped = 0
     #|
     #|    def request(self, symbol: str, args: list[object]) -> Any:
     #|        """Sends one call and returns its decoded payload."""
@@ -415,21 +431,21 @@ pub fn render_runtime() -> String {
     #|            raise MoonError(str(value))
     #|        raise MoonPanic(str(value))
     #|
-    #|    def deferred_release(self, handle: int) -> None:
+    #|    def deferred_release(self, handle: int, type_id: int = 0) -> None:
     #|        """Queues a handle whose Python wrapper was collected."""
     #|        if self._closed:
     #|            return
-    #|        # A release batch carries ids, not objects: `int` tells the codec to
-    #|        # write a number instead of a handle to be resolved again.
-    #|        self._pending.append(int(handle))
+    #|        # A release batch carries numbers, not objects: `int` tells the codec
+    #|        # to write a value instead of resolving a handle again.
+    #|        self._pending.append([int(type_id), int(handle)])
     #|        if len(self._pending) >= self._release_batch:
     #|            self.flush()
     #|
-    #|    def release_now(self, handle: int) -> None:
+    #|    def release_now(self, handle: int, type_id: int = 0) -> None:
     #|        """Releases one handle immediately, bypassing the batch."""
     #|        if self._closed:
     #|            return
-    #|        self._pending.append(int(handle))
+    #|        self._pending.append([int(type_id), int(handle)])
     #|        self.flush()
     #|
     #|    def flush(self) -> int:
@@ -438,9 +454,11 @@ pub fn render_runtime() -> String {
     #|            return 0
     #|        batch = self._pending
     #|        self._pending = []
+    #|        sent = len(batch)
     #|        released = self.request("abi.release", [batch])
     #|        count = released if isinstance(released, int) else 0
     #|        self.releases += count
+    #|        self.dropped += sent - count
     #|        return count
     #|
     #|    def live_handles(self) -> int:
