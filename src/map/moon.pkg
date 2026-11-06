@@ -1,0 +1,7 @@
+import {
+  "gyyyy6/moonbridge/mbti",
+}
+
+pkgtype(kind: "library")
+
+warnings = "-79"
