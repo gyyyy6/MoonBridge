@@ -77,6 +77,35 @@ jobs:
       - name: Generate and type-check stubs
         run: bash scripts/gen.sh all
 
+  end-to-end:
+    name: End to end (generated Python calls a real guest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install wasmtime
+        run: python -m pip install --disable-pip-version-check wasmtime==50.0.1
+
+      # Generates every stub plus a callable module for json and builtin, drives
+      # the generated Python against the compiled guest, then runs the 100k-call
+      # benchmark. The benchmark exits non-zero on a leak, which is the S3
+      # acceptance criterion.
+      - name: Generate, run, benchmark
+        run: bash scripts/e2e.sh
+
   spike-wasm-python:
     name: Spike 01 (Python <-> Wasm)
     runs-on: ubuntu-latest
