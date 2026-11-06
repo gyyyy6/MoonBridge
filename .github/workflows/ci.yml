@@ -49,6 +49,34 @@ jobs:
       - name: Parse corpus
         run: bash scripts/corpus.sh all
 
+  stubs:
+    name: Stubs (mypy --strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install mypy
+        run: python -m pip install --disable-pip-version-check mypy
+
+      # Generates one .pyi per package from the corpus and type-checks the
+      # whole generated package. This is the S2 acceptance criterion: zero
+      # errors, no `# type: ignore`.
+      - name: Generate and type-check stubs
+        run: bash scripts/gen.sh all
+
   spike-wasm-python:
     name: Spike 01 (Python <-> Wasm)
     runs-on: ubuntu-latest
