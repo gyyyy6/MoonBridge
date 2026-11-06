@@ -36,6 +36,14 @@ pub(all) struct PkgInfo {
   /// Type name -> arity, for every type the package introduces. `-1` means the
   /// name was re-exported and its arity is not known.
   types : Map[String, Int32]
+  /// Type names this package declares as `suberror`.
+  ///
+  /// A `Result[T, E]` can only be turned into a Python value when `E` can be
+  /// turned into a message, and only an error type can: the guest writes
+  /// `e.to_string()` on it. Holding the names here is what lets the planner say
+  /// yes to `Result[Int, ParseError]` and no to `Result[Int, Int]` instead of
+  /// emitting a call that does not compile.
+  errors : Map[String, Bool]
   /// `@json` -> `moonbitlang/core/json`, from this package's import block.
   /// An empty value marks an alias that two imports claim.
   aliases : Map[String, String]
@@ -92,6 +100,19 @@ fn collect_types(pkg : @mbti.Package) -> Map[String, Int32] {
 }
 
 ///|
+/// The `suberror` names a package declares.
+fn collect_errors(pkg : @mbti.Package) -> Map[String, Bool] {
+  let out : Map[String, Bool] = Map([])
+  for decl in pkg.decls {
+    match decl {
+      @mbti.Error(e) => out.set(e.name, true)
+      _ => ()
+    }
+  }
+  out
+}
+
+///|
 pub fn World::build(pkgs : Array[@mbti.Package]) -> World {
   let w : World = { pkgs: Map([]), methods: Map([]), }
   // Pass one: identity and type tables. Every package must be registered
@@ -111,6 +132,7 @@ pub fn World::build(pkgs : Array[@mbti.Package]) -> World {
       name: pkg.name,
       stem: module_stem(pkg.name),
       types: collect_types(pkg),
+      errors: collect_errors(pkg),
       aliases,
     })
   }
@@ -145,6 +167,20 @@ pub fn World::build(pkgs : Array[@mbti.Package]) -> World {
     }
   }
   w
+}
+
+///|
+/// Whether `q` names a `suberror` this world knows about.
+///
+/// Used by the planner for one decision only: a `Result[T, E]` can become a
+/// Python value when `E` is an error type, because the guest can render it as a
+/// message. Any other `E` has no `to_string` and the call would not compile.
+pub fn World::is_suberror(self : World, pkg : String, q : @mbti.QName) -> Bool {
+  let home = self.home_of(pkg, q).unwrap_or(pkg)
+  match self.pkgs.get(home) {
+    Some(info) => info.errors.contains(q.name)
+    None => false
+  }
 }
 
 ///|
