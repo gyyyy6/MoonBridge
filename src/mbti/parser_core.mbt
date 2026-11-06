@@ -288,7 +288,21 @@ fn Parser::parse_param(self : Parser) -> Param raise ParseError {
       ignore(self.advance()) // `:`
       { kind, name: Some(name), ty: self.parse_type(), }
     }
-    None => { kind: Positional, name: None, ty: self.parse_type(), }
+    None => {
+      // `x : T` — a positional parameter that still has a name. Rare in dumps
+      // but legal, and useful for generated code.
+      let is_named = match (self.peek().kind, self.peek_n(1).kind) {
+        (Ident(_), Punct(p)) => p == ":"
+        _ => false
+      }
+      if is_named {
+        let name = self.take_ident()
+        ignore(self.advance()) // `:`
+        { kind: Positional, name: Some(name), ty: self.parse_type(), }
+      } else {
+        { kind: Positional, name: None, ty: self.parse_type(), }
+      }
+    }
   }
 }
 
