@@ -7,8 +7,11 @@
 #      guest half of the binding — all from one plan
 #   3. build that guest as wasm
 #   4. drive the generated Python against it: call functions, construct
-#      objects, read and write fields
+#      objects, read and write fields, pass a list / a dict / a callable, catch
+#      a typed error
 #   5. run the 100k-call benchmark, which exits non-zero on a leak
+#   6. build a wheel through PEP 517, pip install it into a throwaway venv, and
+#      use it from outside the repository
 #
 # Step 2 writes into `src/guest_gen`, so a checkout that never runs this script
 # still builds; running it is how that directory is produced.
@@ -114,3 +117,9 @@ echo "== benchmark =="
   --package "$OUT" \
   --wasm "$(to_native "$WASM")" \
   --calls "${BENCH_CALLS:-100000}"
+
+echo
+echo "== wheel =="
+# Packs what the steps above produced, installs it into a throwaway venv, and
+# runs the smoke test from outside the repository.
+bash "$ROOT/scripts/wheel.sh"
