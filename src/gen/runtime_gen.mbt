@@ -798,6 +798,10 @@ pub fn render_init() -> String {
   "This package is written by MoonBridge. Do not edit by hand.\n" +
   "\"\"\"\n" +
   "\n" +
+  "from __future__ import annotations\n" +
+  "\n" +
+  "from pathlib import Path\n" +
+  "\n" +
   "from ._runtime import (\n" +
   "    MoonError,\n" +
   "    MoonObject,\n" +
@@ -815,6 +819,40 @@ pub fn render_init() -> String {
   "    \"MoonStateError\",\n" +
   "    \"Runtime\",\n" +
   "    \"default\",\n" +
+  "    \"install\",\n" +
+  "    \"open_guest\",\n" +
   "    \"set_default\",\n" +
-  "]\n"
+  "]\n" +
+  "\n" +
+  "\n" +
+  "#: Name of the wasm binary inside the installed package.\n" +
+  "_GUEST_FILE = \"_guest.wasm\"\n" +
+  "\n" +
+  "\n" +
+  "def open_guest(wasm: str | Path | None = None) -> tuple[object, Runtime]:\n" +
+  "    \"\"\"Loads the guest module this package ships and returns its host.\n" +
+  "\n" +
+  "    The wheel carries the wasm binary next to this file, so a caller who\n" +
+  "    installed the package has nothing to configure. `wasm` overrides it for\n" +
+  "    a build that wants to test a freshly compiled guest against an installed\n" +
+  "    binding.\n" +
+  "    \"\"\"\n" +
+  "    from . import _wasmtime\n" +
+  "\n" +
+  "    path = Path(wasm) if wasm is not None else Path(__file__).with_name(_GUEST_FILE)\n" +
+  "    host, runtime = _wasmtime.open_runtime(path)\n" +
+  "    return host, runtime\n" +
+  "\n" +
+  "\n" +
+  "def install(wasm: str | Path | None = None) -> tuple[object, Runtime]:\n" +
+  "    \"\"\"Loads the guest and makes it the one every generated module calls.\n" +
+  "\n" +
+  "    This is the whole setup a user needs:\n" +
+  "\n" +
+  "        host, runtime = moonbridge.install()\n" +
+  "        from moonbridge import moonbitlang__core__json as json_ffi\n" +
+  "    \"\"\"\n" +
+  "    host, runtime = open_guest(wasm)\n" +
+  "    set_default(runtime)\n" +
+  "    return host, runtime\n"
 }
