@@ -14,7 +14,7 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
                                             wasm 模块 / native 库
 ```
 
-> 状态：**S0 通过、S1 通过、S2 通过、S3 通过、S4 通过、S5 通过**（2026-11-07）。
+> 状态：**S0 通过、S1 通过、S2 通过、S3 通过、S4 通过、S5 通过、S6 通过**（2026-11-07）。
 > S0：调用 ABI、内存共享、宿主↔MoonBit 字节流、UTF-8 往返全部跑通，实测见
 > [spikes/01-wasm-python](spikes/01-wasm-python/)。
 > S1：`.mbti` 解析器 + 类型图，在 **501 个真实接口文件 / 17,793 条声明**上 100% 通过，
@@ -28,6 +28,9 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
 > S5：`Array` / `Map` / `Option` / `Result` / 回调 / 异常字段全部可跨边界——Python 的 `list`、
 > `dict`、`lambda` 直接传，MoonBit 的 `suberror` 变成 Python 的 `except` 类，
 > 见 [S5 容器与回调](docs/s5-containers-and-callbacks.md)。
+> S6：**打成真正的 wheel**——501 KB，508 个条目，`requires = []` 的自写 PEP 517 后端，
+> 可复现构建；`pip install` 之后 `import moonbridge; moonbridge.install()` 即可用，
+> 见 [S6 打包](docs/s6-wheel.md)。
 
 ---
 
@@ -225,6 +228,30 @@ except mjson.ParseError as exc: ...                  # suberror -> except 类
 [S5 容器与回调](docs/s5-containers-and-callbacks.md) 里，连同"回调通道被建立 ≠ 通得过"
 （`debug_assert` 在 release 下被编译掉，实测 0 次调用）一起。
 
+## S6：wheel
+
+前五个阶段的产物是"能跑的一堆文件"。S6 的验收只有一句：
+
+```bash
+pip install ./dist/moonbridge-0.1.0-py3-none-any.whl
+python -c "import moonbridge; moonbridge.install()"
+```
+
+构建系统是自己写的 128 行 PEP 517 后端，`requires = []`——用户不必为了装这个包先装
+setuptools，断网也能构建。wheel 里是可移植的 wasm 与 494 个 `.pyi`，`Tag: py3-none-any`
+由 `Requires-Dist: wasmtime>=20` 兜住平台差异。
+
+| | S5 | S6 |
+|---|---|---|
+| 分发形态 | `_gen/` 一个目录 | **`moonbridge-0.1.0-py3-none-any.whl`**（501 KB / 508 条目） |
+| 构建依赖 | — | **0**（标准库） |
+| 构建可复现 | — | 两次构建 sha256 相同，且与 pip 驱动后端的结果相同 |
+| 安装后的初始化 | 传 wasm 路径 | `moonbridge.install()` |
+| 安装后功能断言 | — | 11 项全绿，`live=0` |
+
+打包脚本最小心的地方是**从仓库外跑冒烟测试**：在仓库根目录 `import moonbridge` 会找到
+`_gen/`，wheel 少一个文件也照样"通过"。细节见 [S6 打包](docs/s6-wheel.md)。
+
 ## 开发
 
 ```bash
@@ -243,6 +270,10 @@ bash scripts/gen.sh all
 # 生成 + 端到端 + 基准（需要 python + wasmtime）
 bash scripts/e2e.sh
 BENCH_CALLS=20000 bash scripts/e2e.sh   # 快速跑一遍
+
+# 只打包：构建 wheel、装进临时 venv、从仓库外冒烟测试
+bash scripts/wheel.sh
+bash scripts/wheel.sh --keep-venv       # 留着 venv 检查
 
 # Spike 复现（需要 Python 3.10+ 与 wasmtime）
 cd spikes/01-wasm-python/module && moon build --target wasm && cd ..
@@ -269,7 +300,8 @@ python bridge_test.py
       10 万次 × 6 用例 150 万帧 0 泄漏（见 [报告](docs/s4-object-model.md)）
 - [x] **S5** 容器、回调与异常字段：`Array` / `Map` / `Option` / `Result` / `Callable` 全部可跨边界，
       `suberror` 变成 Python 异常类（见 [报告](docs/s5-containers-and-callbacks.md)）
-- [ ] **S6** PEP 517 打包、真实包端到端、批量协议与基准
+- [x] **S6** PEP 517 打包与真实包端到端：自写构建后端（零依赖、可复现），
+      `pip install` 后 `import moonbridge` 即可用（见 [报告](docs/s6-wheel.md)）
 - [ ] **S7** native(C ABI) 后端、CI 矩阵、文档站
 
 ---
