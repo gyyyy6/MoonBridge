@@ -54,7 +54,89 @@ pub(all) enum Wire {
   WMaybe(Wire)
   /// A value that stays in the guest's heap.
   WHandle(TyRef)
+  /// `Array[T]` / `FixedArray[T]`, which is a Python `list`.
+  ///
+  /// Containers are structural, not nominal: `Array[Int]` and `Array[String]`
+  /// are the same conversion applied to different elements, so the shape is a
+  /// tree and the guest emits one decoder per node in it.
+  WArr(Wire)
+  /// `ArrayView[T]`: the same bytes as `WArr`, but the guest has to build a
+  /// view at the call site. Kept apart because MoonBit does not coerce an
+  /// `Array` into an `ArrayView` at a call, and the generator is the only place
+  /// that knows which one the callee wants.
+  WArrView(Wire)
+  /// `Map[K, V]`, which is a Python `dict`. The wire already carries maps as
+  /// pairs, so nothing about the format changes.
+  WMap(Wire, Wire)
+  /// `Result[T, E]` in a return position, where `E` is a `suberror`.
+  ///
+  /// Python has one way to say "this did not work", and it is an exception, so
+  /// `Ok` becomes the value and `Err` becomes a raised `MoonError`. Erasing the
+  /// wrapper is the honest mapping: a caller who wants to branch on failure
+  /// wraps the call in `try`, exactly as they would for any other Python API.
+  WRes(Wire, Wire)
+  /// A function value, which the guest invokes through a host import.
+  ///
+  /// The parameters and the return are themselves wire shapes, so a callback
+  /// that takes an array of handles works the same as one that takes an int.
+  WCall(Array[Wire], Wire)
 } derive(Debug, Eq)
+
+///|
+/// An identifier-safe name for a shape, used to name the decoder and encoder
+/// emitted for it: `Array[Int]` is `arr_int`, `Map[String, Array[Int]]` is
+/// `map_str_arr_int`.
+///
+/// Structural rather than generated, because two parameters of the same shape
+/// must share one helper — otherwise the guest emits the same function twice
+/// and the second definition does not compile.
+pub fn Wire::key(self : Wire) -> String {
+  match self {
+    WInt => "int"
+    WDouble => "double"
+    WBool => "bool"
+    WStr => "str"
+    WStrView => "strview"
+    WUnit => "unit"
+    WMaybe(inner) => "opt_" + inner.key()
+    WHandle(t) => t.key
+    WArr(inner) => "arr_" + inner.key()
+    // The same decoder: a view is built from a list after it is decoded.
+    WArrView(inner) => "arr_" + inner.key()
+    WMap(k, v) => "map_" + k.key() + "_" + v.key()
+    WRes(ok, err) => "res_" + ok.key() + "_" + err.key()
+    WCall(params, ret) => {
+      let parts : Array[String] = []
+      for p in params {
+        parts.push(p.key())
+      }
+      "cb_" + join_strings(parts, "_") + "_to_" + ret.key()
+    }
+  }
+}
+
+///|
+/// Whether a shape can cross the callback channel.
+///
+/// Deliberately narrow. A callback that took a handle would have to guess which
+/// side owns it, and one that took an array would need a second copy of the
+/// container decoder on a path that has no error channel — a Python exception
+/// inside a callback is recorded and re-raised after the outer call returns.
+/// Scalars have neither problem.
+fn is_callback_shape(w : Wire) -> Bool {
+  match w {
+    WInt
+    | WDouble
+    | WBool
+    | WStr
+    | WUnit
+    | WMaybe(WInt)
+    | WMaybe(WDouble)
+    | WMaybe(WBool)
+    | WMaybe(WStr) => true
+    _ => false
+  }
+}
 
 ///|
 /// What a symbol does, which decides how the guest writes the call.
@@ -111,6 +193,13 @@ pub(all) struct Sym {
   labels : Array[String]
   ret : Wire
   raises : Bool
+  /// The declared error type of `raise E`, fully qualified, or empty when the
+  /// declaration only says `raise`.
+  ///
+  /// It is what lets Python raise the *generated* exception class instead of a
+  /// generic one: `except ParseError` works because the guest names the type it
+  /// raised, not because the message was parsed.
+  error_type : String
 } derive(Debug)
 
 ///|
@@ -353,22 +442,66 @@ fn Builder::wire_in(
   match ty {
     @mbti.Unit => Some(WUnit)
     @mbti.Named(q, args) =>
-      if args.length() > 0 {
-        None
-      } else {
-        match q.name {
-          "Int" => Some(WInt)
-          "Double" => Some(WDouble)
-          "Bool" => Some(WBool)
-          "String" => Some(WStr)
-          "StringView" => Some(WStrView)
-          "Unit" => Some(WUnit)
-          _ =>
+      match q.name {
+        // `Int32` is the name `moon info` writes for a 32-bit `Int`, and the
+        // wire integer is 32 bits wide, so the two are the same shape. A
+        // genuine `Int64` is not: it would be truncated, so it stays unmapped.
+        "Int" | "Int32" => if args.length() == 0 { Some(WInt) } else { None }
+        "Double" | "Float" =>
+          if args.length() == 0 {
+            Some(WDouble)
+          } else {
+            None
+          }
+        "Bool" => if args.length() == 0 { Some(WBool) } else { None }
+        "String" => if args.length() == 0 { Some(WStr) } else { None }
+        "StringView" => if args.length() == 0 { Some(WStrView) } else { None }
+        "Unit" => if args.length() == 0 { Some(WUnit) } else { None }
+        "Array" | "FixedArray" =>
+          self.single_arg(pkg, args, owner, fn(w) { WArr(w) })
+        "ArrayView" =>
+          // Read-only by construction, and Python has no way to hand a view
+          // over: it sends a list, and the guest builds the view from it.
+          self.single_arg(pkg, args, owner, fn(w) { WArrView(w) })
+        "Option" =>
+          match self.single_arg(pkg, args, owner, fn(w) { WMaybe(w) }) {
+            // `T??` is not a shape the frame has.
+            Some(WMaybe(WMaybe(_))) => None
+            other => other
+          }
+        "Map" =>
+          if args.length() != 2 {
+            None
+          } else {
+            match
+              (
+                self.wire_in(pkg, args[0], owner),
+                self.wire_in(pkg, args[1], owner),
+              ) {
+              // A `StringView` element borrows from a string that the container
+              // does not own, so it cannot outlive the decode. Refusing keeps
+              // the guest free of dangling views.
+              (Some(k), Some(v)) =>
+                if contains_strview(k) || contains_strview(v) {
+                  None
+                } else {
+                  Some(WMap(k, v))
+                }
+              _ => None
+            }
+          }
+        // `Result` is only readable in a return position: a parameter would
+        // have to be built from a Python value, and Python has no `Err`.
+        "Result" => None
+        _ =>
+          if args.length() > 0 {
+            None
+          } else {
             match self.resolve_handle(pkg, q) {
               Some(t) => Some(WHandle(t))
               None => None
             }
-        }
+          }
       }
     @mbti.SelfType(args) =>
       if args.length() > 0 {
@@ -379,7 +512,82 @@ fn Builder::wire_in(
           None => None
         }
       }
+    @mbti.Func(params, ret, effect) => {
+      // A function value crosses as a callable: Python holds the function, the
+      // guest holds an id, and the guest calls back through a wasm import.
+      let shapes : Array[Wire] = []
+      let mut ok = !effect.raises && !effect.raises_may
+      for p in params {
+        match self.wire_in(pkg, p.ty, owner) {
+          Some(w) => {
+            // A handle or an array inside a callback would have to be built on
+            // one side and released on the other; the callback channel carries
+            // scalars, so that is what it says.
+            if !is_callback_shape(w) {
+              ok = false
+            }
+            shapes.push(w)
+          }
+          None => ok = false
+        }
+      }
+      match self.wire_out(pkg, ret, owner) {
+        Some(r) => if ok { Some(WCall(shapes, r)) } else { None }
+        None => None
+      }
+    }
     _ => None
+  }
+}
+
+///|
+/// Whether a shape carries a borrowed string anywhere inside it.
+fn contains_strview(w : Wire) -> Bool {
+  match w {
+    WStrView => true
+    WMaybe(inner) | WArr(inner) | WArrView(inner) => contains_strview(inner)
+    WMap(k, v) => contains_strview(k) || contains_strview(v)
+    WRes(ok, err) => contains_strview(ok) || contains_strview(err)
+    WCall(params, ret) => {
+      let mut found = contains_strview(ret)
+      for p in params {
+        if contains_strview(p) {
+          found = true
+        }
+      }
+      found
+    }
+    _ => false
+  }
+}
+
+///|
+/// Applies a one-argument constructor (`Array`, `Option`) to the shape of its
+/// argument, or `None` when the arity is wrong.
+///
+/// The element is resolved with the same owner the container had, so `Array[Self]`
+/// inside a method on that type is the handle the method already holds. The
+/// borrowed-string check is what keeps that safe: a `StringView` would borrow
+/// from a string the container does not own, so it is refused rather than
+/// decoded into storage that outlives its source.
+fn Builder::single_arg(
+  self : Builder,
+  pkg : String,
+  args : Array[@mbti.TypeExpr],
+  owner : TyRef?,
+  make : (Wire) -> Wire,
+) -> Wire? {
+  if args.length() != 1 {
+    return None
+  }
+  match self.wire_in(pkg, args[0], owner) {
+    Some(inner) =>
+      if contains_strview(inner) {
+        None
+      } else {
+        Some(make(inner))
+      }
+    None => None
   }
 }
 
@@ -400,6 +608,30 @@ fn Builder::wire_out(
         Some(w) => Some(WMaybe(w))
         None => None
       }
+    // A `Result` only makes sense on the way out: `Ok` is the value and `Err`
+    // is an exception, which is the only failure Python has.
+    @mbti.Named(q, args) =>
+      if q.name == "Result" && args.length() == 2 {
+        match args[1] {
+          @mbti.Named(err, err_args) =>
+            if err_args.length() == 0 && self.world.is_suberror(pkg, err) {
+              match self.wire_out(pkg, args[0], owner) {
+                Some(ok) => Some(WRes(ok, WStr))
+                None => None
+              }
+            } else {
+              None
+            }
+          _ => None
+        }
+      } else {
+        self.wire_in(pkg, ty, owner)
+      }
+    @mbti.Func(_, _, _) =>
+      // A callback cannot be a return value: the Python side would have to
+      // invent an object for a MoonBit closure to call into, and there is no
+      // guest-side callable to hand out.
+      None
     _ => self.wire_in(pkg, ty, owner)
   }
 }
@@ -528,7 +760,56 @@ fn Builder::func_decl(self : Builder, pkg : String, f : @mbti.FuncDecl) -> Unit 
     labels,
     ret,
     raises: f.effect.raises,
+    error_type: {
+      let declared = qualified_error(self.world, pkg, f)
+      if declared != "" {
+        declared
+      } else {
+        // `Result[T, E]` is the other way a function says what can go wrong, and
+        // the Python side raises the same class either way, so the error type
+        // has to be recovered from the return type when there is no `raise`.
+        result_error_name(self.world, pkg, f.ret)
+      }
+    },
   })
+}
+
+///|
+/// The fully qualified error type inside `Result[T, E]`, or empty when the type
+/// is not a `Result` over a named error.
+fn result_error_name(
+  world : @map.World,
+  pkg : String,
+  ty : @mbti.TypeExpr,
+) -> String {
+  match ty {
+    @mbti.Named(q, args) =>
+      if q.name == "Result" && args.length() == 2 {
+        match args[1] {
+          @mbti.Named(e, _) =>
+            world.home_of(pkg, e).unwrap_or(pkg) + "::" + e.name
+          _ => ""
+        }
+      } else {
+        ""
+      }
+    _ => ""
+  }
+}
+
+///|
+/// The fully qualified name of a function's declared error type, or empty when
+/// the declaration says only `raise`.
+fn qualified_error(
+  world : @map.World,
+  pkg : String,
+  f : @mbti.FuncDecl,
+) -> String {
+  match f.effect.error {
+    Some(@mbti.Named(q, _)) =>
+      world.home_of(pkg, q).unwrap_or(pkg) + "::" + q.name
+    _ => ""
+  }
 }
 
 ///|
@@ -599,6 +880,7 @@ fn Builder::struct_decl(
       labels: ctor_labels,
       ret: WHandle(owner),
       raises: false,
+      error_type: "",
     })
   } else {
     self.skip("unmarshalable-field")
@@ -617,6 +899,7 @@ fn Builder::struct_decl(
           labels: [f.name],
           ret: w,
           raises: false,
+          error_type: "",
         })
       None => self.skip("unreadable-field")
     }
@@ -634,6 +917,7 @@ fn Builder::struct_decl(
             labels: [f.name, ""],
             ret: WUnit,
             raises: false,
+            error_type: "",
           })
         None => self.skip("unwritable-field")
       }

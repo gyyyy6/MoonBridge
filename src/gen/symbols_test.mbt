@@ -46,6 +46,14 @@ fn wire_json() -> @mbti.Package {
     "\n" +
     "pub fn takes_closure((Int) -> Int) -> Int\n" +
     "\n" +
+    "pub fn takes_map(Map[String, Int]) -> Int\n" +
+    "\n" +
+    "pub fn takes_result(String) -> Result[Int, ParseError]\n" +
+    "\n" +
+    "pub fn takes_tuple((Int, Int)) -> Unit\n" +
+    "\n" +
+    "pub fn takes_view_map(Map[String, StringView]) -> Unit\n" +
+    "\n" +
     "pub fn labeled(x~ : Int) -> Int\n",
   ).unwrap()
 }
@@ -167,8 +175,14 @@ test "every concrete type that crosses gets its own table, numbered from one" {
 ///|
 test "a value the frame cannot carry is skipped with a counted reason" {
   let plan = standard_plan()
-  assert_false(plan.has("acme/json::takes_array"))
-  assert_false(plan.has("acme/json::takes_closure"))
+  // S5 closed the container gap: a list, a map and a callable all travel now.
+  assert_true(plan.has("acme/json::takes_array"))
+  assert_true(plan.has("acme/json::takes_map"))
+  assert_true(plan.has("acme/json::takes_closure"))
+  assert_true(plan.has("acme/json::takes_result"))
+  // A tuple has no shape, and a borrowed view cannot outlive a container.
+  assert_false(plan.has("acme/json::takes_tuple"))
+  assert_false(plan.has("acme/json::takes_view_map"))
   assert_false(plan.has("acme/json::labeled"))
   let mut params = 0
   let mut labeled = 0
@@ -179,10 +193,46 @@ test "a value the frame cannot carry is skipped with a counted reason" {
       _ => ()
     }
   }
-  // `takes_array` and `takes_closure`; the closure is refused by shape, the
-  // array because an `Array[Int]` has no wire representation yet.
+  // The tuple, and the map whose values are borrowed views.
   assert_eq(params, 2)
   assert_eq(labeled, 1)
+}
+
+///|
+test "an array parameter is a list on the wire" {
+  let plan = standard_plan()
+  let sym = plan.lookup("acme/json::takes_array").unwrap()
+  // Python's `list[int]` — no wrapper, no tag: the shape is the element shape.
+  assert_eq(sym.params, [WArr(@gen.WInt)])
+}
+
+///|
+test "a map parameter keeps both of its sides" {
+  let plan = standard_plan()
+  let sym = plan.lookup("acme/json::takes_map").unwrap()
+  // Python's `dict[str, int]`; a `Map` is a container like any other, so it can
+  // nest inside one.
+  assert_eq(sym.params, [WMap(@gen.WStr, @gen.WInt)])
+}
+
+///|
+test "a callable parameter becomes a callback shape" {
+  let plan = standard_plan()
+  let sym = plan.lookup("acme/json::takes_closure").unwrap()
+  // `(Int) -> Int` crosses as an id plus the signature the host has to honour.
+  assert_eq(sym.params, [WCall([@gen.WInt], @gen.WInt)])
+}
+
+///|
+test "a result return names the error the Python caller will catch" {
+  let plan = standard_plan()
+  let sym = plan.lookup("acme/json::takes_result").unwrap()
+  // `Ok` carries the value, and the error side is only a message: Python has no
+  // value to hand over for `Err`, it has a `raise`.
+  assert_eq(sym.ret, WRes(@gen.WInt, @gen.WStr))
+  // Even though the declaration says no `raise`, the `Result` names the error
+  // type, and that name is what the generated exception class is called.
+  assert_eq(sym.error_type, "acme/json::ParseError")
 }
 
 ///|
