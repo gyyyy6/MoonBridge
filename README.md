@@ -14,7 +14,7 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
                                             wasm 模块 / native 库
 ```
 
-> 状态：**S0 通过、S1 通过、S2 通过、S3 通过、S4 通过**（2026-11-06）。
+> 状态：**S0 通过、S1 通过、S2 通过、S3 通过、S4 通过、S5 通过**（2026-11-07）。
 > S0：调用 ABI、内存共享、宿主↔MoonBit 字节流、UTF-8 往返全部跑通，实测见
 > [spikes/01-wasm-python](spikes/01-wasm-python/)。
 > S1：`.mbti` 解析器 + 类型图，在 **501 个真实接口文件 / 17,793 条声明**上 100% 通过，
@@ -25,6 +25,9 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
 > 见 [S3 运行时](docs/s3-runtime.md)。
 > S4：**guest 侧也由生成器产出**，对象能被构造、读、写；10 万次 × 6 个用例共 150 万帧，
 > 内存曲线平直、`live=0`、`dropped=0`，见 [S4 对象模型](docs/s4-object-model.md)。
+> S5：`Array` / `Map` / `Option` / `Result` / 回调 / 异常字段全部可跨边界——Python 的 `list`、
+> `dict`、`lambda` 直接传，MoonBit 的 `suberror` 变成 Python 的 `except` 类，
+> 见 [S5 容器与回调](docs/s5-containers-and-callbacks.md)。
 
 ---
 
@@ -193,6 +196,35 @@ S3 的绑定只有一半是生成的：`.py` / `.pyi` 从接口推出来，**gue
 **什么都没释放**，Python 侧却把这次释放算成功。只有 `Runtime.dropped` 看得见它。
 细节见 [S4 对象模型](docs/s4-object-model.md)。
 
+## S5：容器、回调与异常
+
+到 S4 为止，能调的函数都是**标量函数**：`Array`、`Map`、`Option`、`Result`、函数值全在
+`unmarshalable-param` 这一格里。S5 把这一格清掉，Python 侧不需要任何新类型：
+
+```python
+Json.array([Json.number(1.0), Json.string("two")])   # list -> Array[Json]
+Json.object_({"a": Json.number(1.0)})                # dict -> Map[String, Json]
+mcb.call_with(lambda x: x + 2, 40)                   # callable -> Int32 id
+try: mjson.parse("{oops")
+except mjson.ParseError as exc: ...                  # suberror -> except 类
+```
+
+回调是这里唯一需要新机制的东西：wire 上只有一个 `Int32` id，guest 通过 **wasm import**
+回头调用宿主，所以回调发生在 guest 栈上——没有协程、没有重放、没有第二个线程。
+
+| | S4 | S5 |
+|---|---|---|
+| wire 形状 | 8 个标量 | 递归树（`WArr` / `WMap` / `WRes` / `WCall`） |
+| guest 符号 | 49 | **54** |
+| `unmarshalable-param` | 15 | **14** |
+| 端到端断言 | 29 | **42** |
+
+验收抓到的是一类"只在重新生成之后才红"的 bug：`Option[T]` 的解码器就是 `T` 的解码器，
+于是按名字去重时 `WMaybe(WInt)` 会把 `dec_int` 这个名字占住却什么都不写，真正的报错出现在
+生成物的 `dec_int is unbound`。名字和形状不是一对一，这一课写在
+[S5 容器与回调](docs/s5-containers-and-callbacks.md) 里，连同"回调通道被建立 ≠ 通得过"
+（`debug_assert` 在 release 下被编译掉，实测 0 次调用）一起。
+
 ## 开发
 
 ```bash
@@ -235,7 +267,8 @@ python bridge_test.py
       （见 [报告](docs/s3-runtime.md)）
 - [x] **S4** 生成 guest 与对象模型：dispatch 表与句柄表由计划产出，对象可构造/读/写，
       10 万次 × 6 用例 150 万帧 0 泄漏（见 [报告](docs/s4-object-model.md)）
-- [ ] **S5** 集合 / `Option` / `Result` / 回调 / 异常字段映射
+- [x] **S5** 容器、回调与异常字段：`Array` / `Map` / `Option` / `Result` / `Callable` 全部可跨边界，
+      `suberror` 变成 Python 异常类（见 [报告](docs/s5-containers-and-callbacks.md)）
 - [ ] **S6** PEP 517 打包、真实包端到端、批量协议与基准
 - [ ] **S7** native(C ABI) 后端、CI 矩阵、文档站
 
