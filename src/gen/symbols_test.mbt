@@ -97,7 +97,11 @@ test "an optional parameter travels as a maybe" {
   // The result is a handle, not a value: a parsed document stays in the guest.
   assert_eq(
     sym.ret,
-    WHandle({ expr: "@builtin.Widget", key: "builtin_Widget", }),
+    WHandle({
+      expr: "@builtin.Widget",
+      pkg: "moonbitlang/core/builtin",
+      key: "builtin_Widget",
+    }),
   )
 }
 
@@ -110,7 +114,11 @@ test "a method declared away from its type still takes the receiver" {
   // `Self` resolves to the receiver's home package, not the declaring one.
   assert_eq(
     sym.params[0],
-    WHandle({ expr: "@builtin.Widget", key: "builtin_Widget", }),
+    WHandle({
+      expr: "@builtin.Widget",
+      pkg: "moonbitlang/core/builtin",
+      key: "builtin_Widget",
+    }),
   )
   assert_eq(sym.params[1], WMaybe(@gen.WStr))
   assert_eq(sym.ret, @gen.WStr)
@@ -122,11 +130,16 @@ test "a struct yields a constructor, a getter per field and a setter per mut fie
   let ctor = plan.lookup("acme/json::Node::__new__").unwrap()
   assert_eq(ctor.kind, @gen.Ctor)
   assert_eq(ctor.params, [@gen.WStr, @gen.WDouble])
-  assert_eq(ctor.ret, WHandle({ expr: "@json.Node", key: "json_Node", }))
+  assert_eq(
+    ctor.ret,
+    WHandle({ expr: "@json.Node", pkg: "acme/json", key: "json_Node", }),
+  )
 
   let name = plan.lookup("acme/json::Node::__get_name").unwrap()
   assert_eq(name.kind, @gen.Getter)
-  assert_eq(name.params, [WHandle({ expr: "@json.Node", key: "json_Node", })])
+  assert_eq(name.params, [
+    WHandle({ expr: "@json.Node", pkg: "acme/json", key: "json_Node", }),
+  ])
   assert_eq(name.ret, @gen.WStr)
 
   // `weight` is `mut`, so it gets a setter as well as a getter.
@@ -134,7 +147,7 @@ test "a struct yields a constructor, a getter per field and a setter per mut fie
   let setter = plan.lookup("acme/json::Node::__set_weight").unwrap()
   assert_eq(setter.kind, @gen.Setter)
   assert_eq(setter.params, [
-    WHandle({ expr: "@json.Node", key: "json_Node", }),
+    WHandle({ expr: "@json.Node", pkg: "acme/json", key: "json_Node", }),
     @gen.WDouble,
   ])
   assert_eq(setter.ret, @gen.WUnit)

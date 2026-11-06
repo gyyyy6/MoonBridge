@@ -24,6 +24,9 @@
 pub(all) struct TyRef {
   /// The MoonBit type expression, e.g. `@json.Position`.
   expr : String
+  /// The package that declares the type, so the guest knows which import it
+  /// needs and the Python side knows which table tag to send.
+  pkg : String
   /// An identifier-safe spelling, e.g. `json_Position`. Used for the table, its
   /// helpers and the Python class attribute.
   key : String
@@ -93,10 +96,19 @@ pub(all) struct Sym {
   decl_pkg : String
   /// Raw MoonBit type name of the receiver, empty for a free function.
   owner : String
+  /// The package the receiver's type belongs to, which is where the call has
+  /// to be spelled: `Json::stringify` is a method on `@builtin.Json` even
+  /// though `json` declares it.
+  owner_pkg : String
   /// Raw name of the function or field.
   name : String
   /// Parameter shapes, receiver first when the symbol takes one.
   params : Array[Wire]
+  /// One label per parameter, empty when the parameter has none. A function's
+  /// optional parameter must be passed by label — MoonBit does not accept it
+  /// positionally — and a struct literal must name its fields, so both need the
+  /// names kept alongside the shapes.
+  labels : Array[String]
   ret : Wire
   raises : Bool
 } derive(Debug)
@@ -320,7 +332,11 @@ fn Builder::resolve_handle(
   match self.world.arity_of(home, q.name) {
     Some(0) => {
       let at = @map.pkg_alias(home)
-      Some({ expr: at + "." + q.name, key: wire_key(at + "." + q.name), })
+      Some({
+        expr: at + "." + q.name,
+        pkg: home,
+        key: wire_key(at + "." + q.name),
+      })
     }
     _ => None
   }
@@ -423,6 +439,8 @@ fn Builder::func_decl(self : Builder, pkg : String, f : @mbti.FuncDecl) -> Unit 
   }
   let mut owner : TyRef? = None
   let mut owner_raw = ""
+  let mut owner_pkg = pkg
+  let mut takes_self = false
   let mut rest = f.params
   match f.receiver {
     Some(r) => {
@@ -434,19 +452,31 @@ fn Builder::func_decl(self : Builder, pkg : String, f : @mbti.FuncDecl) -> Unit 
           return self.skip("receiver-not-in-guest")
       }
       owner_raw = r.name
+      owner_pkg = self.world.home_of(pkg, r).unwrap_or(pkg)
       owner = Some(slot)
       if f.params.length() > 0 && is_self_ty(f.params[0].ty) {
         // The receiver is passed as argument zero, because that is what the
         // Python side sends: `self` followed by the declared parameters.
+        takes_self = true
         rest = drop_receiver(f.params)
       }
     }
     None => ()
   }
   let params : Array[Wire] = []
-  match owner {
-    Some(o) => params.push(WHandle(o))
-    None => ()
+  let labels : Array[String] = []
+  // Only a declaration that actually takes a `Self` has a receiver. A
+  // `Type::Type(...)` constructor function and a `Type::from_*` builder are
+  // associated functions: they produce a value of the type, they do not
+  // receive one, and the Python side renders them as static methods.
+  if takes_self {
+    match owner {
+      Some(o) => {
+        params.push(WHandle(o))
+        labels.push("")
+      }
+      None => ()
+    }
   }
   for p in rest {
     match p.kind {
@@ -468,6 +498,14 @@ fn Builder::func_decl(self : Builder, pkg : String, f : @mbti.FuncDecl) -> Unit 
         _ => w
       },
     )
+    // An optional parameter can only be passed by label, so its name is part
+    // of the call, not a comment on it.
+    labels.push(
+      match p.kind {
+        @mbti.Optional => p.name.unwrap_or("")
+        _ => ""
+      },
+    )
   }
   let ret = match self.wire_out(pkg, f.ret, owner) {
     Some(r) => r
@@ -484,8 +522,10 @@ fn Builder::func_decl(self : Builder, pkg : String, f : @mbti.FuncDecl) -> Unit 
     symbol,
     decl_pkg: pkg,
     owner: owner_raw,
+    owner_pkg,
     name: f.name,
     params,
+    labels,
     ret,
     raises: f.effect.raises,
   })
@@ -516,6 +556,7 @@ fn Builder::struct_decl(
   let at = @map.pkg_alias(pkg)
   let owner : TyRef = {
     expr: at + "." + s.name,
+    pkg,
     key: wire_key(at + "." + s.name),
   }
   let visible : Array[@mbti.Field] = []
@@ -535,10 +576,14 @@ fn Builder::struct_decl(
     return self.skip("unnamed-field")
   }
   let ctor_params : Array[Wire] = []
+  let ctor_labels : Array[String] = []
   let mut ctor_ok = true
   for f in visible {
     match self.wire_in(pkg, f.ty, Some(owner)) {
-      Some(w) => ctor_params.push(w)
+      Some(w) => {
+        ctor_params.push(w)
+        ctor_labels.push(f.name)
+      }
       None => ctor_ok = false
     }
   }
@@ -548,8 +593,10 @@ fn Builder::struct_decl(
       symbol: ctor_symbol(pkg, s.name),
       decl_pkg: pkg,
       owner: s.name,
+      owner_pkg: pkg,
       name: "__new__",
       params: ctor_params,
+      labels: ctor_labels,
       ret: WHandle(owner),
       raises: false,
     })
@@ -564,8 +611,10 @@ fn Builder::struct_decl(
           symbol: getter_symbol(pkg, s.name, f.name),
           decl_pkg: pkg,
           owner: s.name,
+          owner_pkg: pkg,
           name: f.name,
           params: [WHandle(owner)],
+          labels: [f.name],
           ret: w,
           raises: false,
         })
@@ -579,8 +628,10 @@ fn Builder::struct_decl(
             symbol: setter_symbol(pkg, s.name, f.name),
             decl_pkg: pkg,
             owner: s.name,
+            owner_pkg: pkg,
             name: f.name,
             params: [WHandle(owner), w],
+            labels: [f.name, ""],
             ret: WUnit,
             raises: false,
           })
