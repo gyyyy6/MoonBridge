@@ -1,0 +1,6 @@
+import {
+  "gyyyy6/moonbridge/mbti",
+  "moonbitlang/core/env",
+}
+
+pkgtype(kind: "executable")

@@ -10,6 +10,8 @@
 pub(all) enum Access {
   /// `pub(all)`: constructors and fields are part of the public API.
   Open
+  /// `pub(open)`: used for traits that downstream packages may implement.
+  OpenTrait
   /// `pub`: the type is public, its constructors and fields are not.
   ReadOnly
   /// `priv`, or a plain `type` declaration with no visibility modifier.
@@ -63,26 +65,37 @@ pub(all) struct Param {
 } derive(Debug, Eq)
 
 ///|
-/// The effect annotation trailing a function type.
-pub(all) enum EffectKind {
-  /// No annotation.
-  Pure
-  /// `raise`.
-  Raises
-  /// `raise?`.
-  RaisesMay
-} derive(Debug, Eq)
-
-///|
+/// The effect annotation trailing a function type. MoonBit lets effects be
+/// combined: `-> Unit noraise + nocancel` is legal, so this is a flag set
+/// rather than a single tag.
 pub(all) struct Effect {
-  kind : EffectKind
-  /// The declared error type of `raise Foo`, when present.
+  /// `raise` or `raise E`.
+  raises : Bool
+  /// `raise?`.
+  raises_may : Bool
+  /// `noraise`.
+  no_raise : Bool
+  /// `nocancel`.
+  no_cancel : Bool
+  /// The declared error type of `raise E`, when present.
   error : TypeExpr?
 } derive(Debug, Eq)
 
 ///|
 pub fn Effect::pure() -> Effect {
-  { kind: Pure, error: None, }
+  {
+    raises: false,
+    raises_may: false,
+    no_raise: false,
+    no_cancel: false,
+    error: None,
+  }
+}
+
+///|
+/// `true` when no effect annotation was written at all.
+pub fn Effect::is_pure(self : Effect) -> Bool {
+  !self.raises && !self.raises_may && !self.no_raise && !self.no_cancel
 }
 
 ///|
@@ -101,6 +114,8 @@ pub(all) enum TypeExpr {
   Optional(TypeExpr)
   /// `&Show` — a borrowed trait object, as in `inspect(&Show, ...)`.
   Borrowed(TypeExpr)
+  /// `async (T) -> U` — an asynchronous function type.
+  Async(TypeExpr)
   /// `Unit`.
   Unit
 } derive(Debug, Eq)
@@ -126,6 +141,7 @@ pub fn TypeExpr::collect_names(self : TypeExpr, out : Array[QName]) -> Unit {
     }
     Optional(inner) => inner.collect_names(out)
     Borrowed(inner) => inner.collect_names(out)
+    Async(inner) => inner.collect_names(out)
     Unit => ()
   }
 }
@@ -141,6 +157,7 @@ pub fn TypeExpr::head_name(self : TypeExpr) -> String {
     Func(_, _, _) => "Function"
     Optional(_) => "Option"
     Borrowed(_) => "Borrowed"
+    Async(_) => "Async"
     Unit => "Unit"
   }
 }
@@ -178,6 +195,8 @@ pub(all) struct ValueDecl {
 /// receiver in `receiver`.
 pub(all) struct FuncDecl {
   name : String
+  /// `pub async fn ...` — an asynchronous function.
+  is_async : Bool
   receiver : QName?
   generics : Array[GenericParam]
   params : Array[Param]
@@ -188,11 +207,31 @@ pub(all) struct FuncDecl {
 } derive(Debug, Eq)
 
 ///|
-/// A struct field.
+/// `pub const PI : Double = 0x3.243F...` — a compile-time constant. The value
+/// is kept as raw text because it is a literal expression, not a type.
+pub(all) struct ConstDecl {
+  name : String
+  ty : TypeExpr
+  value : String
+  attrs : Array[Attr]
+  access : Access
+} derive(Debug, Eq)
+
+///|
+/// A struct field or enum constructor field.
+///
+/// Struct fields written positionally (`struct ArgsLoc(Int)`) have an empty
+/// name. Constructor fields may additionally be labeled (`More(A, tail~ : List[A])`),
+/// which `label` records.
 pub(all) struct Field {
+  /// Empty for a positional field.
   name : String
   ty : TypeExpr
   access : Access
+  /// `mut tail : List[A]` and `mut val : T` both set this.
+  is_mut : Bool
+  /// `Some(Optional)` for `x? : T`, `Some(Labeled)` for `x~ : T`.
+  label : ParamKind?
 } derive(Debug, Eq)
 
 ///|
@@ -208,10 +247,11 @@ pub(all) struct StructDecl {
 } derive(Debug, Eq)
 
 ///|
-/// One enum constructor, with its positional payload.
+/// One enum constructor. `None`/`Some`-like constructors carry an empty field
+/// list; payloads reuse `Field` so labeled constructor fields survive.
 pub(all) struct Ctor {
   name : String
-  payload : Array[TypeExpr]
+  fields : Array[Field]
 } derive(Debug, Eq)
 
 ///|
@@ -259,24 +299,34 @@ pub(all) struct AliasDecl {
 pub(all) struct OpaqueDecl {
   name : String
   generics : Array[GenericParam]
+  /// `type MatchResult derive(Eq)` — an opaque type can still derive traits.
+  derives : Array[QName]
   access : Access
   attrs : Array[Attr]
 } derive(Debug, Eq)
 
 ///|
-/// `pub using @pkg {type A as B}` — a re-export from another package.
-pub(all) struct ReexportDecl {
-  pkg : String
+/// One entry of a re-export block: `type ArrayView as View` or `trait ToJson`.
+pub(all) struct ReexportEntry {
   /// `"type"` or `"trait"`.
   kind : String
   name : String
+  /// The `as` alias, when the entry is renamed.
   as_name : String?
+} derive(Debug, Eq)
+
+///|
+/// `pub using @pkg {type A as B, trait C}` — a re-export from another package.
+pub(all) struct ReexportDecl {
+  pkg : String
+  entries : Array[ReexportEntry]
 } derive(Debug, Eq)
 
 ///|
 pub(all) enum Decl {
   Func(FuncDecl)
   Value(ValueDecl)
+  Const(ConstDecl)
   Struct(StructDecl)
   Enum(EnumDecl)
   /// `suberror` — an enum that inhabits the error type.
@@ -294,6 +344,7 @@ pub fn Decl::kind_name(self : Decl) -> String {
   match self {
     Func(_) => "fn"
     Value(_) => "let"
+    Const(_) => "const"
     Struct(_) => "struct"
     Enum(_) => "enum"
     Error(_) => "error"
@@ -312,6 +363,7 @@ pub fn Decl::declared_name(self : Decl) -> String? {
   match self {
     Func(f) => Some(f.name)
     Value(v) => Some(v.name)
+    Const(c) => Some(c.name)
     Struct(s) => Some(s.name)
     Enum(e) => Some(e.name)
     Error(e) => Some(e.name)
@@ -319,7 +371,10 @@ pub fn Decl::declared_name(self : Decl) -> String? {
     Impl(_) => None
     Alias(a) => Some(a.name)
     Opaque(o) => Some(o.name)
-    Reexport(r) => Some(r.as_name.unwrap_or(r.name))
+    Reexport(r) => {
+      let first = r.entries[0]
+      Some(first.as_name.unwrap_or(first.name))
+    }
   }
 }
 

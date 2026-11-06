@@ -173,7 +173,8 @@ pub fn tokenize(src : String) -> Array[Token] {
       let next = if i + 1 < n { bytes.at(i + 1).to_int() } else { -1 }
       let text = if (c == 45 && next == 62) ||
         (c == 61 && next == 62) ||
-        (c == 46 && next == 46) {
+        (c == 46 && next == 46) ||
+        (c == 58 && next == 58) {
         i = i + 2
         col = col + 2
         ascii_str(c) + ascii_str(next)

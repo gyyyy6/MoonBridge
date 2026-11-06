@@ -29,7 +29,13 @@ test "TypeExpr collects names from function types and effects" {
   let te = @mbti.TypeExpr::Func(
     [{ kind: Positional, name: None, ty: named("T", []), }],
     named("Result", [named("Int", []), named("MyError", [])]),
-    { kind: Raises, error: Some(named("MyError", [])), },
+    {
+      raises: true,
+      raises_may: false,
+      no_raise: false,
+      no_cancel: false,
+      error: Some(named("MyError", [])),
+    },
   )
   let out : Array[@mbti.QName] = []
   te.collect_names(out)
@@ -78,12 +84,14 @@ test "Package counts declarations by kind" {
       @mbti.Decl::Opaque({
         name: "Buffer",
         generics: [],
+        derives: [],
         access: Private,
         attrs: [],
       }),
       @mbti.Decl::Opaque({
         name: "Reader",
         generics: [],
+        derives: [],
         access: Private,
         attrs: [],
       }),
