@@ -554,7 +554,12 @@ fn Parser::parse_decl(self : Parser) -> Decl raise ParseError {
         self.skip_newlines()
       }
       let derives = self.parse_derives()
-      Decl::Opaque({ name, generics, derives, access, attrs, })
+      // `.mbti` only ever lists the public surface, and it prints a public
+      // opaque type without a modifier: `type Uuid derive(Eq)`. A missing
+      // modifier therefore means "public but representation hidden", not
+      // "private" — a private type would not appear in the dump at all.
+      let opaque_access = if access == Private { ReadOnly } else { access }
+      Decl::Opaque({ name, generics, derives, access: opaque_access, attrs, })
     }
   } else {
     raise unexpected(self.peek(), "a declaration")

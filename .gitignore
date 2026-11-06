@@ -33,3 +33,5 @@ Thumbs.db
 
 # Corpus working directory created by scripts/corpus.sh
 _corpus/
+_gen/
+_scratch/

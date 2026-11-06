@@ -82,6 +82,23 @@ test "parse: declaration counts by kind" {
 }
 
 ///|
+test "parse: an unmodified opaque type is public" {
+  // `.mbti` lists only the public surface, so `type Buffer` means "public, but
+  // the representation is hidden". Treating it as private would drop the type
+  // from generated stubs while every function still mentions it.
+  let pkg = @mbti.parse(sample)
+  for decl in pkg.decls {
+    match decl {
+      @mbti.Decl::Opaque(o) =>
+        if o.name == "Buffer" {
+          assert_eq(o.access, @mbti.ReadOnly)
+        }
+      _ => ()
+    }
+  }
+}
+
+///|
 test "parse: const keeps its literal verbatim" {
   let pkg = @mbti.parse(sample)
   match pkg.decls[0] {
