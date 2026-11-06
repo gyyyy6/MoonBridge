@@ -1,0 +1,28 @@
+# Third-party modules whose published interface dumps form the S1 corpus.
+# Format: <module>@<version>, one per line. Versions are pinned so the
+# corpus is reproducible; bump them deliberately, not by accident.
+#
+# Selection rule: one head package per common domain (data formats, text,
+# networking, serialization, CLI, parsing, storage, observability, crypto
+# primitives, compression), chosen from `moon search` results that expose a
+# public GitHub repository.
+moonbit-community/yaml@0.0.8
+mizchi/markdown@0.8.4
+gaato/http@0.5.0
+moonbitlang/protobuf@0.2.0
+bobzhang/toml@0.4.3
+moonbit-community/NyaCSV@0.3.4
+cc06b/mooncry@0.95.0
+mizchi/semver@0.1.2
+cli/diff@0.2.4
+mizchi/mwac@0.2.2
+ash1day/sql@0.2.1
+mizchi/admiral@0.1.1
+cli/test@0.2.3
+lampclaw/i18n@0.9.3
+moonbitlang/regexp@0.3.7
+f4ah6o/uuidm@0.2.1
+hongweifei/lua@0.1.0
+tonyfettes/xlog@0.4.2
+moonbit-community/flate@0.10.0
+moonbit-community/opentelemetry@0.1.8

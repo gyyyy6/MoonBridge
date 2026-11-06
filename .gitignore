@@ -30,3 +30,6 @@ Thumbs.db
 
 # Generated interface dumps (moon info)
 *.generated.mbti
+
+# Corpus working directory created by scripts/corpus.sh
+_corpus/

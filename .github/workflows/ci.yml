@@ -29,6 +29,26 @@ jobs:
       - name: Format
         run: moon fmt --check
 
+  corpus:
+    name: Corpus (real .mbti files parse)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Parses the standard library plus every interface dump published by the
+      # modules pinned in corpus/packages.txt, and fails on a single error.
+      - name: Parse corpus
+        run: bash scripts/corpus.sh all
+
   spike-wasm-python:
     name: Spike 01 (Python <-> Wasm)
     runs-on: ubuntu-latest
