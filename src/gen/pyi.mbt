@@ -50,15 +50,41 @@ pub(all) struct Stub {
   skipped : Int32
   /// Type positions degraded to `Any`, by reason.
   degraded : Array[@map.Degrade]
+  /// Module stems this stub imports, sorted. Empty for a self-contained
+  /// package, which is still the common case.
+  imports : Array[String]
 }
 
 ///|
-/// Renders the stub for one package.
+/// Renders the stub for one package with no knowledge of its neighbours.
+///
+/// Every cross-package type degrades to `Any`, which keeps the stub
+/// independently checkable. Useful for tests and for a single-package run.
 pub fn generate(pkg : @mbti.Package, opts : GenOptions) -> Stub {
+  generate_with(None, pkg, opts)
+}
+
+///|
+/// Renders the stub for one package inside a world.
+///
+/// With a world, `@json.Json` becomes `_moonbitlang__core__json.Json` and the
+/// stub imports that module, so the type checker sees the real class instead
+/// of `Any`. Stub modules may import each other in a cycle: Python never
+/// executes a `.pyi`, and the type checker resolves the cycle itself.
+pub fn generate_with(
+  world : @map.World?,
+  pkg : @mbti.Package,
+  opts : GenOptions,
+) -> Stub {
+  let mapper = match world {
+    Some(w) => @map.Mapper::for_world(w, pkg.name, None)
+    None => @map.Mapper::for_package(pkg)
+  }
   let em : Emitter = {
     opts,
     pkg_name: pkg.name,
-    mapper: @map.Mapper::for_package(pkg),
+    world,
+    mapper,
     blocks: [],
     methods: Map([]),
     emitted: Map([]),
@@ -108,6 +134,7 @@ pub fn generate(pkg : @mbti.Package, opts : GenOptions) -> Stub {
     fields: em.field_count,
     skipped: em.skipped,
     degraded: em.mapper.degraded,
+    imports: em.mapper.imports(),
   }
 }
 
@@ -117,6 +144,7 @@ pub fn generate(pkg : @mbti.Package, opts : GenOptions) -> Stub {
 priv struct Emitter {
   opts : GenOptions
   pkg_name : String
+  world : @map.World?
   mapper : @map.Mapper
   /// Finished top-level blocks, in source order.
   blocks : Array[String]
@@ -273,7 +301,7 @@ fn Emitter::decl(self : Emitter, decl : @mbti.Decl) -> Unit {
         // class in this package has no place to live.
         Some(_) => ()
         None =>
-          match self.render_func(f, None, None) {
+          match self.render_func(f, None, None, self.mapper) {
             Some(block) => {
               self.blocks.push(block)
               self.func_count = self.func_count + 1
@@ -474,8 +502,9 @@ fn Emitter::render_func(
   f : @mbti.FuncDecl,
   owner : String?,
   forced : String?,
+  base : @map.Mapper,
 ) -> String? {
-  let scoped = self.mapper.for_decl(f.generics, owner)
+  let scoped = base.for_decl(f.generics, owner)
   let ret = scoped.map(f.ret)
   self.note_type(ret)
   match owner {
@@ -591,54 +620,88 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
   for fname in field_names {
     taken.set(fname, true)
   }
-  self.attach_methods(name, members, taken)
+  self.attach_methods(name, s.name, members, taken)
   let header = self.class_header(name, s.generics, [], false, true)
   Some(header + "\n" + body_of("MoonBit struct `" + s.name + "`.", members))
+}
+
+///|
+/// Every method defined on `<pkg>::<Type>`, with the package that declared it.
+///
+/// With a world this includes methods declared by other packages, which is how
+/// `Json::stringify` (declared by the json package) ends up on the `Json` class
+/// that the builtin stub emits.
+fn Emitter::methods_for(
+  self : Emitter,
+  raw_name : String,
+) -> Array[(String, @mbti.FuncDecl)] {
+  match self.world {
+    Some(w) =>
+      match w.methods_on(self.pkg_name, raw_name) {
+        Some(list) => list
+        None => []
+      }
+    None =>
+      match self.methods.get(raw_name) {
+        Some(list) => list.map(fn(f) { (self.pkg_name, f) })
+        None => []
+      }
+  }
+}
+
+///|
+/// The naming context for a method: the declaring package's type table, with
+/// its local names written through its own module when the method is being
+/// rendered somewhere else.
+fn Emitter::method_mapper(self : Emitter, decl_pkg : String) -> @map.Mapper {
+  match self.world {
+    Some(w) =>
+      @map.Mapper::for_world(
+        w,
+        decl_pkg,
+        if decl_pkg == self.pkg_name {
+          None
+        } else {
+          Some(decl_pkg)
+        },
+      ).adopt_notes(self.mapper)
+    None => self.mapper
+  }
 }
 
 ///|
 fn Emitter::attach_methods(
   self : Emitter,
   class_name : String,
+  raw_name : String,
   members : Array[String],
   taken : Map[String, Bool],
 ) -> Unit {
-  let key = match self.receiver_key(class_name) {
-    Some(k) => k
-    None => return
-  }
-  match self.methods.get(key) {
-    None => ()
-    Some(list) =>
-      for f in list {
-        let base = member_name(f, class_name)
-        // A field and a method may share a name in MoonBit, where the compiler
-        // tells them apart by call syntax. Python has one namespace, so the
-        // method moves aside rather than disappearing.
-        let mut name = base
-        let mut suffix = 2
-        while taken.contains(name) {
-          name = base + "_" + suffix.to_string()
-          suffix = suffix + 1
-        }
-        taken.set(name, true)
-        match self.render_func(f, Some(class_name), Some(name)) {
-          Some(text) => members.push(text)
-          None => self.skipped = self.skipped + 1
-        }
-      }
-  }
-}
-
-///|
-/// Maps a Python class name back to the MoonBit receiver name it stands for.
-fn Emitter::receiver_key(self : Emitter, class_name : String) -> String? {
-  for name in self.methods.keys() {
-    if @map.stub_name(name) == class_name {
-      return Some(name)
+  for entry in self.methods_for(raw_name) {
+    let decl_pkg = entry.0
+    let f = entry.1
+    let base = member_name(f, class_name)
+    // A field and a method may share a name in MoonBit, where the compiler
+    // tells them apart by call syntax. Python has one namespace, so the
+    // method moves aside rather than disappearing.
+    let mut name = base
+    let mut suffix = 2
+    while taken.contains(name) {
+      name = base + "_" + suffix.to_string()
+      suffix = suffix + 1
+    }
+    taken.set(name, true)
+    match
+      self.render_func(
+        f,
+        Some(class_name),
+        Some(name),
+        self.method_mapper(decl_pkg),
+      ) {
+      Some(text) => members.push(text)
+      None => self.skipped = self.skipped + 1
     }
   }
-  None
 }
 
 ///|
@@ -696,7 +759,7 @@ fn Emitter::render_enum(
   if ctors.length() > 0 {
     taken.set("tag", true)
   }
-  self.attach_methods(name, members, taken)
+  self.attach_methods(name, raw_name, members, taken)
   let header = self.class_header(name, generics, [], is_error, true)
   Some(
     header + "\n" + body_of("MoonBit " + kind + " `" + raw_name + "`.", members),
@@ -756,7 +819,7 @@ fn Emitter::render_opaque(self : Emitter, o : @mbti.OpaqueDecl) -> String? {
   self.type_count = self.type_count + 1
   let members : Array[String] = []
   let taken : Map[String, Bool] = Map([])
-  self.attach_methods(name, members, taken)
+  self.attach_methods(name, o.name, members, taken)
   let header = self.class_header(name, o.generics, [], false, true)
   Some(
     header +
@@ -798,10 +861,38 @@ fn Emitter::render_reexport(self : Emitter, r : @mbti.ReexportDecl) -> Unit {
     if !self.claim(name) {
       continue
     }
-    // The real class lives in another package, which this stub does not import.
-    self.typing_used.set("Any", true)
     self.typing_used.set("TypeAlias", true)
-    self.blocks.push(name + ": TypeAlias = Any")
+    let target = self.reexport_target(r.pkg, entry.name)
+    match target {
+      Some(rendered) => self.blocks.push(name + ": TypeAlias = " + rendered)
+      None => {
+        // The real class lives in a package this run did not include.
+        self.typing_used.set("Any", true)
+        self.blocks.push(name + ": TypeAlias = Any")
+      }
+    }
+  }
+}
+
+///|
+/// The Python name of a re-exported type, when its source package is known.
+fn Emitter::reexport_target(
+  self : Emitter,
+  from : String,
+  name : String,
+) -> String? {
+  match self.mapper.world {
+    Some(w) =>
+      match w.resolve_alias(self.pkg_name, from) {
+        Some(pkg) =>
+          match w.arity_of(pkg, name) {
+            Some(_) =>
+              Some(self.mapper.module_ref(pkg) + "." + @map.stub_name(name))
+            None => None
+          }
+        None => None
+      }
+    None => None
   }
 }
 
@@ -843,6 +934,15 @@ fn Emitter::assemble(self : Emitter) -> String {
   }
   if typing_names.length() > 0 {
     sb.write_string("\nfrom typing import " + join(typing_names, ", ") + "\n")
+  }
+  let relative = self.mapper.imports()
+  if relative.length() > 0 {
+    sb.write_string("\n")
+    for stem in relative {
+      // `_` plus the stem cannot collide with a generated class name, and one
+      // alias per module keeps two packages' `Point` apart.
+      sb.write_string("from . import " + stem + " as _" + stem + "\n")
+    }
   }
   let runtime : Array[String] = []
   if self.need_error {

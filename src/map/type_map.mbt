@@ -204,6 +204,18 @@ pub fn Degrade::describe(self : Degrade) -> String {
 pub(all) struct Mapper {
   /// Package under generation; recorded on notes.
   pkg : String
+  /// Every package being generated, when more than this one is in scope. With
+  /// a world, `@json.Json` becomes a real reference instead of `Any`.
+  world : World?
+  /// When set, a name this package declares is emitted qualified with the
+  /// module of `prefix_pkg` instead of bare. Used to render a method declared
+  /// in package A but attached to a class emitted in package B.
+  prefix_pkg : String?
+  /// The package whose stub is being written. Links to it are not imported,
+  /// because a module cannot import itself.
+  render_pkg : String
+  /// Module stems this mapping referenced, so the stub can import them.
+  linked : Map[String, String]
   /// Local type name -> arity. `-1` means "arity unknown", used for re-exports.
   locals : Map[String, Int32]
   /// Type variables in scope, e.g. `T` for `fn[T] f(T)`.
@@ -220,6 +232,10 @@ pub(all) struct Mapper {
 pub fn Mapper::new(pkg : String) -> Mapper {
   {
     pkg,
+    world: None,
+    prefix_pkg: None,
+    render_pkg: pkg,
+    linked: Map([]),
     locals: Map([]),
     bound: Map([]),
     self_name: None,
@@ -236,31 +252,106 @@ pub fn Mapper::register(self : Mapper, name : String, arity : Int32) -> Unit {
 }
 
 ///|
-/// Registers every type the package itself defines, including re-exported
-/// names (which have unknown arity).
+/// A mapper for one package on its own. Cross-package references degrade,
+/// because the world holds nothing else.
 pub fn Mapper::for_package(pkg : @mbti.Package) -> Mapper {
-  let m = Mapper::new(pkg.name)
-  for decl in pkg.decls {
-    match decl {
-      @mbti.Struct(s) => m.register(s.name, s.generics.length())
-      @mbti.Enum(e) => m.register(e.name, e.generics.length())
-      @mbti.Error(e) => m.register(e.name, e.generics.length())
-      @mbti.Opaque(o) => m.register(o.name, o.generics.length())
-      @mbti.Alias(a) => m.register(a.name, a.generics.length())
-      @mbti.Reexport(r) =>
-        for entry in r.entries {
-          if entry.kind == "type" {
-            m.register(entry.as_name.unwrap_or(entry.name), -1)
-          }
-        }
-      @mbti.Decl::Func(_)
-      | @mbti.Value(_)
-      | @mbti.Const(_)
-      | @mbti.Trait(_)
-      | @mbti.Impl(_) => ()
-    }
+  Mapper::for_world(World::build([pkg]), pkg.name, None)
+}
+
+///|
+/// A mapper for one package inside a world.
+///
+/// `prefix_pkg` is set when this mapper renders types *belonging to another
+/// package*: a method declared in package A but attached to a class emitted in
+/// package B must qualify A's local names with A's module, or the annotation
+/// would point at a class that B's stub does not declare.
+pub fn Mapper::for_world(
+  world : World,
+  pkg : String,
+  prefix_pkg : String?,
+) -> Mapper {
+  let locals = match world.info_of(pkg) {
+    Some(info) => info.types
+    None => Map([])
   }
-  m
+  {
+    pkg,
+    world: Some(world),
+    prefix_pkg,
+    render_pkg: pkg,
+    linked: Map([]),
+    locals,
+    bound: Map([]),
+    self_name: None,
+    depth_limit: 24,
+    degraded: [],
+  }
+}
+
+///|
+/// Records that an annotation refers to `pkg`, and returns the local alias its
+/// module is imported under.
+///
+/// The alias is `_` plus the module stem, which cannot collide with a
+/// generated class: MoonBit type names never start with `_`, and a private
+/// declaration never reaches the interface in the first place.
+pub fn Mapper::module_ref(self : Mapper, pkg : String) -> String {
+  let stem = match self.world {
+    Some(w) =>
+      match w.stem_of(pkg) {
+        Some(s) => s
+        None => module_stem(pkg)
+      }
+    None => module_stem(pkg)
+  }
+  if pkg != self.render_pkg {
+    self.linked.set(stem, pkg)
+  }
+  "_" + stem
+}
+
+///|
+/// A mapper that resolves names against its own package but reports into the
+/// emitter's books.
+///
+/// Without this, a method declared in another package would accumulate its
+/// degradations in a throwaway array and the run would under-report how much
+/// precision the package lost.
+pub fn Mapper::adopt_notes(self : Mapper, root : Mapper) -> Mapper {
+  {
+    pkg: self.pkg,
+    world: self.world,
+    prefix_pkg: self.prefix_pkg,
+    render_pkg: root.render_pkg,
+    linked: root.linked,
+    locals: self.locals,
+    bound: self.bound,
+    self_name: self.self_name,
+    depth_limit: self.depth_limit,
+    degraded: root.degraded,
+  }
+}
+
+///|
+/// The name to write for a type this package declares. Bare by default,
+/// module-qualified when the mapper is rendering another package's method.
+fn Mapper::qualify(self : Mapper, name : String) -> String {
+  match self.prefix_pkg {
+    Some(p) => self.module_ref(p) + "." + stub_name(name)
+    None => stub_name(name)
+  }
+}
+
+///|
+/// Module stems referenced so far, sorted so regenerating an unchanged package
+/// produces identical bytes.
+pub fn Mapper::imports(self : Mapper) -> Array[String] {
+  let out : Array[String] = []
+  for stem in self.linked.keys() {
+    out.push(stem)
+  }
+  out.sort()
+  out
 }
 
 ///|
@@ -277,6 +368,10 @@ pub fn Mapper::for_decl(
   }
   {
     pkg: self.pkg,
+    world: self.world,
+    prefix_pkg: self.prefix_pkg,
+    render_pkg: self.render_pkg,
+    linked: self.linked,
     locals: self.locals,
     bound,
     self_name,
@@ -396,15 +491,29 @@ fn Mapper::map_named(
   depth : Int32,
 ) -> PyType {
   match q.pkg {
-    Some(pkg) =>
-      if pkg == "@builtin" {
+    Some(at) =>
+      if at == "@builtin" {
+        // The prelude is the one package whose types have a direct Python
+        // counterpart, so the builtin table wins before any linking.
         match self.map_builtin(q.name, args, depth) {
           Some(t) => t
-          None => self.unknown(q.name)
+          None =>
+            match self.link_through(at, q.name, args, depth) {
+              Some(t) => t
+              None => {
+                self.note(UnknownType(q.name))
+                PyAny
+              }
+            }
         }
       } else {
-        self.note(ForeignType(q.to_string()))
-        PyAny
+        match self.link_through(at, q.name, args, depth) {
+          Some(t) => t
+          None => {
+            self.note(ForeignType(at + "." + q.name))
+            PyAny
+          }
+        }
       }
     None => {
       if self.bound.contains(q.name) {
@@ -429,19 +538,74 @@ fn Mapper::map_named(
                 self.note(ArityMismatch(q.name, -1, args.length()))
                 PyAny
               } else {
-                PyHandle(stub_name(q.name), [])
+                PyHandle(self.qualify(q.name), [])
               }
             } else if arity == args.length() {
-              PyHandle(stub_name(q.name), self.map_args(args, depth))
+              PyHandle(self.qualify(q.name), self.map_args(args, depth))
             } else {
               self.note(ArityMismatch(q.name, arity, args.length()))
               PyAny
             }
           } else {
-            self.unknown(q.name)
+            // `.mbti` writes an unqualified name for anything in the implicit
+            // prelude. If the builtin package is part of this world it knows
+            // the type, so `Json` becomes a real reference instead of `Any`.
+            match self.link_through("@builtin", q.name, args, depth) {
+              Some(t) => t
+              None => self.unknown(q.name)
+            }
           }
       }
     }
+  }
+}
+
+///|
+/// Resolves `@alias.Type` against the world and emits a reference to the class
+/// the other package's stub will declare.
+///
+/// Returns `None` when the alias names nothing this world knows, which is not
+/// an error: a package may import a module that is not being generated.
+fn Mapper::link_through(
+  self : Mapper,
+  at : String,
+  name : String,
+  args : Array[@mbti.TypeExpr],
+  depth : Int32,
+) -> PyType? {
+  match self.world {
+    None => None
+    Some(w) =>
+      match w.resolve_alias(self.pkg, at) {
+        None => None
+        Some(pkg) =>
+          match w.arity_of(pkg, name) {
+            // The package is in the world but does not declare this name: it
+            // is a re-export chain the linker cannot follow.
+            None => None
+            Some(arity) =>
+              if arity < 0 {
+                if args.length() > 0 {
+                  self.note(ArityMismatch(name, -1, args.length()))
+                  Some(PyAny)
+                } else {
+                  Some(
+                    PyHandle(self.module_ref(pkg) + "." + stub_name(name), []),
+                  )
+                }
+              } else if arity == args.length() {
+                Some(
+                  PyHandle(
+                    self.module_ref(pkg) + "." + stub_name(name),
+                    self.map_args(args, depth),
+                  ),
+                )
+              } else {
+                self.note(ArityMismatch(name, arity, args.length()))
+                Some(PyAny)
+              }
+          }
+      }
   }
 }
 

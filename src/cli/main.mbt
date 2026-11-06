@@ -110,6 +110,8 @@ priv struct GenTally {
   mut funcs : Int32
   mut fields : Int32
   mut skipped : Int32
+  mut linked : Int32
+  mut imports : Int32
   mut foreign : Int32
   mut unknown : Int32
   mut higher_order : Int32
@@ -129,6 +131,8 @@ fn GenTally::new() -> GenTally {
     funcs: 0,
     fields: 0,
     skipped: 0,
+    linked: 0,
+    imports: 0,
     foreign: 0,
     unknown: 0,
     higher_order: 0,
@@ -143,6 +147,11 @@ fn GenTally::new() -> GenTally {
 ///|
 /// Generates one stub per input file into `<out_dir>/moonbridge/`, together
 /// with the runtime module the stubs import. Returns the number of failures.
+///
+/// Parsing happens for the whole corpus before anything is written, because a
+/// stub can only reference a neighbour whose declaration is already known: the
+/// world is built from every package first, then each stub is rendered against
+/// it.
 fn run_gen(files : Array[String], out_dir : String) -> Int32 {
   let pkg_dir = out_dir + "/moonbridge"
   if !make_dir(pkg_dir) {
@@ -153,9 +162,7 @@ fn run_gen(files : Array[String], out_dir : String) -> Int32 {
   ignore(write_text_file(pkg_dir + "/_runtime.py", @gen.render_runtime()))
   ignore(write_text_file(pkg_dir + "/py.typed", ""))
   let tally = GenTally::new()
-  // Two packages can flatten to the same module stem; writing both would lose
-  // one silently, so a collision is a hard failure.
-  let stems : Map[String, String] = Map([])
+  let pkgs : Array[@mbti.Package] = []
   for path in files {
     let src = read_text_file(path)
     if src == "" {
@@ -164,52 +171,61 @@ fn run_gen(files : Array[String], out_dir : String) -> Int32 {
       continue
     }
     match @mbti.parse_result(src) {
-      Ok(pkg) => {
-        let stub = @gen.generate(pkg, @gen.GenOptions::standard())
-        match stems.get(stub.module_name) {
-          Some(other) =>
-            if other != pkg.name {
-              tally.failed = tally.failed + 1
-              println(
-                "FAIL " +
-                pkg.name +
-                ": module stem " +
-                stub.module_name +
-                " already used by " +
-                other,
-              )
-              continue
-            }
-          None => ()
-        }
-        stems.set(stub.module_name, pkg.name)
-        if !write_text_file(pkg_dir + "/" + stub.filename, stub.text) {
-          tally.failed = tally.failed + 1
-          println("FAIL " + pkg.name + ": cannot write " + stub.filename)
-          continue
-        }
-        tally.stubs = tally.stubs + 1
-        tally.types = tally.types + stub.types
-        tally.funcs = tally.funcs + stub.funcs
-        tally.fields = tally.fields + stub.fields
-        tally.skipped = tally.skipped + stub.skipped
-        for reason in stub.degraded {
-          match reason {
-            @map.ForeignType(_) => tally.foreign = tally.foreign + 1
-            @map.UnknownType(_) => tally.unknown = tally.unknown + 1
-            @map.HigherOrderFunction =>
-              tally.higher_order = tally.higher_order + 1
-            @map.AsyncValue => tally.async_degraded = tally.async_degraded + 1
-            @map.ArityMismatch(_, _, _) => tally.arity = tally.arity + 1
-            @map.ResultErased => tally.result_erased = tally.result_erased + 1
-            @map.TooDeep => tally.too_deep = tally.too_deep + 1
-            @map.UnboundSelf => tally.unbound_self = tally.unbound_self + 1
-          }
-        }
-      }
+      Ok(pkg) => pkgs.push(pkg)
       Err(msg) => {
         tally.failed = tally.failed + 1
         println("FAIL " + path + ": " + msg)
+      }
+    }
+  }
+  let world = @map.World::build(pkgs)
+  println("link: " + world.summary())
+  // Two packages can flatten to the same module stem; writing both would lose
+  // one silently, so a collision is a hard failure.
+  let stems : Map[String, String] = Map([])
+  for pkg in pkgs {
+    let stub = @gen.generate_with(Some(world), pkg, @gen.GenOptions::standard())
+    match stems.get(stub.module_name) {
+      Some(other) =>
+        if other != pkg.name {
+          tally.failed = tally.failed + 1
+          println(
+            "FAIL " +
+            pkg.name +
+            ": module stem " +
+            stub.module_name +
+            " already used by " +
+            other,
+          )
+          continue
+        }
+      None => ()
+    }
+    stems.set(stub.module_name, pkg.name)
+    if !write_text_file(pkg_dir + "/" + stub.filename, stub.text) {
+      tally.failed = tally.failed + 1
+      println("FAIL " + pkg.name + ": cannot write " + stub.filename)
+      continue
+    }
+    tally.stubs = tally.stubs + 1
+    tally.types = tally.types + stub.types
+    tally.funcs = tally.funcs + stub.funcs
+    tally.fields = tally.fields + stub.fields
+    tally.skipped = tally.skipped + stub.skipped
+    tally.imports = tally.imports + stub.imports.length()
+    if stub.imports.length() > 0 {
+      tally.linked = tally.linked + 1
+    }
+    for reason in stub.degraded {
+      match reason {
+        @map.ForeignType(_) => tally.foreign = tally.foreign + 1
+        @map.UnknownType(_) => tally.unknown = tally.unknown + 1
+        @map.HigherOrderFunction => tally.higher_order = tally.higher_order + 1
+        @map.AsyncValue => tally.async_degraded = tally.async_degraded + 1
+        @map.ArityMismatch(_, _, _) => tally.arity = tally.arity + 1
+        @map.ResultErased => tally.result_erased = tally.result_erased + 1
+        @map.TooDeep => tally.too_deep = tally.too_deep + 1
+        @map.UnboundSelf => tally.unbound_self = tally.unbound_self + 1
       }
     }
   }
@@ -227,6 +243,12 @@ fn run_gen(files : Array[String], out_dir : String) -> Int32 {
     tally.fields.to_string() +
     " skipped=" +
     tally.skipped.to_string(),
+  )
+  println(
+    "imports: modules=" +
+    tally.linked.to_string() +
+    " edges=" +
+    tally.imports.to_string(),
   )
   println(
     "degraded: foreign=" +
