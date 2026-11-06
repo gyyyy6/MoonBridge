@@ -99,10 +99,11 @@ jobs:
       - name: Install wasmtime
         run: python -m pip install --disable-pip-version-check wasmtime==50.0.1
 
-      # Generates every stub plus a callable module for json and builtin, drives
-      # the generated Python against the compiled guest, then runs the 100k-call
-      # benchmark. The benchmark exits non-zero on a leak, which is the S3
-      # acceptance criterion.
+      # Regenerates the stubs, the callable modules and the guest half from one
+      # plan, then drives the generated Python against the compiled guest and
+      # runs the 100k-call benchmark over six cases. The benchmark exits
+      # non-zero on a leak or on a release the guest could not route, which is
+      # the S4 acceptance criterion.
       - name: Generate, run, benchmark
         run: bash scripts/e2e.sh
 

@@ -14,7 +14,7 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
                                             wasm 模块 / native 库
 ```
 
-> 状态：**S0 通过、S1 通过、S2 通过、S3 通过**（2026-11-06）。
+> 状态：**S0 通过、S1 通过、S2 通过、S3 通过、S4 通过**（2026-11-06）。
 > S0：调用 ABI、内存共享、宿主↔MoonBit 字节流、UTF-8 往返全部跑通，实测见
 > [spikes/01-wasm-python](spikes/01-wasm-python/)。
 > S1：`.mbti` 解析器 + 类型图，在 **501 个真实接口文件 / 17,793 条声明**上 100% 通过，
@@ -23,6 +23,8 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
 > 见 [S2 映射与生成](docs/s2-type-mapping.md)。
 > S3：跨包句柄与生命周期，**真实 json 包端到端跑通，10 万次调用 0 泄漏、guest 内存逐字节不变**，
 > 见 [S3 运行时](docs/s3-runtime.md)。
+> S4：**guest 侧也由生成器产出**，对象能被构造、读、写；10 万次 × 6 个用例共 150 万帧，
+> 内存曲线平直、`live=0`、`dropped=0`，见 [S4 对象模型](docs/s4-object-model.md)。
 
 ---
 
@@ -163,6 +165,34 @@ bash scripts/e2e.sh
 导出函数的返回值泄漏（41 字节/次）、世代计数器回绕（每 1023 次漏一个）。三个都写进
 [S3 运行时](docs/s3-runtime.md)，包括怎么二分定位的。
 
+## S4：生成 guest 与对象模型
+
+S3 的绑定只有一半是生成的：`.py` / `.pyi` 从接口推出来，**guest 的 dispatch 表是手写的**。
+手写的表会漂——它不会因为编译失败被发现，只会在某次调用悄悄返回错的字段。S4 把这个缺口补上：
+
+```text
+                    ┌──────────── Plan ─────────────┐
+.mbti ──▶ World ──▶ │ Sym[]        符号/形状/标签    │ ──┬──▶ .py / .pyi   调用方
+ (S1)     (S3)      │ HandleSlot[] 每类型一张句柄表   │   └──▶ guest.mbt    应答方
+                    └───────────────────────────────┘
+```
+
+一份计划，两半投影，**两半不可能不一致**。顺带把"看得见"变成"用得上"：生成的类现在真的能
+`Position(3, 7)`、读 `line`、写 `cursor`。
+
+| | S3 | S4 |
+|---|---|---|
+| guest 侧 dispatch | 手写 270 行 | **生成 1161 行**（`--guest` / `--guest-out`） |
+| 句柄表 | 手写 12 张 | **按用到的具体类型生成** |
+| 生成类的可调用成员 | 只有方法 | 方法 + `__init__` + `@property` + setter |
+| 端到端断言 | 调通 + 释放 | 构造、读、写、句柄实参、`dropped=0` |
+| 10 万次基准 | 4 个用例 | 6 个用例，150 万帧，内存平直 |
+
+验收又抓到一个不报错的泄漏：`parse` 返回 `Json` 的句柄，而 `Json` 是 **enum**，
+`render_enum` 从来没写 `moon_type_id`——`close()` 发出 `release_tag(0, id)`，guest 里没有 tag 0 的表，
+**什么都没释放**，Python 侧却把这次释放算成功。只有 `Runtime.dropped` 看得见它。
+细节见 [S4 对象模型](docs/s4-object-model.md)。
+
 ## 开发
 
 ```bash
@@ -203,9 +233,11 @@ python bridge_test.py
       （见 [报告](docs/s2-type-mapping.md)）
 - [x] **S3** 跨包句柄与生命周期：真实 json 包端到端可调，10 万次往返 0 泄漏、内存不涨
       （见 [报告](docs/s3-runtime.md)）
-- [ ] **S4** 集合 / `Option` / `Result` / 回调 / 异常映射
-- [ ] **S5** PEP 517 打包、真实包端到端、批量协议与基准
-- [ ] **S6** native(C ABI) 后端、CI 矩阵、文档站
+- [x] **S4** 生成 guest 与对象模型：dispatch 表与句柄表由计划产出，对象可构造/读/写，
+      10 万次 × 6 用例 150 万帧 0 泄漏（见 [报告](docs/s4-object-model.md)）
+- [ ] **S5** 集合 / `Option` / `Result` / 回调 / 异常字段映射
+- [ ] **S6** PEP 517 打包、真实包端到端、批量协议与基准
+- [ ] **S7** native(C ABI) 后端、CI 矩阵、文档站
 
 ---
 
