@@ -20,8 +20,21 @@ test "ids are unique and independent" {
 }
 
 ///|
-test "a released handle stops resolving" {
-  let t : @abi.HandleTable[String] = @abi.HandleTable::new()
+test "no live handle is ever zero" {
+  // The host uses 0 for "no object": `weakref.finalize` is skipped and
+  // `close()` returns early on it. A first handle of 0 would therefore leak
+  // silently, which is exactly what happened before generations started at 1.
+  let t : @abi.HandleTable[Int32] = @abi.HandleTable::new()
+  let first = t.insert(1)
+  assert_true(first != 0)
+  ignore(t.release(first))
+  let again = t.insert(2)
+  assert_true(again != 0)
+  assert_true(again != first)
+}
+
+///|
+test "a released handle stops resolving" {  let t : @abi.HandleTable[String] = @abi.HandleTable::new()
   let id = t.insert("gone")
   assert_true(t.release(id))
   assert_eq(t.get(id), None)

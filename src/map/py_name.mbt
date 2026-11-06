@@ -97,7 +97,14 @@ pub fn is_shadow_sensitive(name : String) -> Bool {
     | "type"
     | "property"
     | "staticmethod"
-    | "classmethod" => true
+    | "classmethod"
+    // Members of the generated base class. A MoonBit field or method with one
+    // of these names would override `MoonObject` with an incompatible
+    // signature, so it moves aside like the rest.
+    | "close"
+    | "handle_id"
+    | "self"
+    | "cls" => true
     _ => is_stub_binding(name)
   }
 }

@@ -105,69 +105,114 @@ fn slice(b : Bytes, start : Int32, end : Int32) -> Bytes {
 }
 
 ///|
-/// The dispatcher. Symbol names are `<package>::<declaration>`, so a host can
-/// address any package in the guest without a registration step.
+/// `args[i]`, or `None` when the caller sent fewer arguments than the symbol
+/// needs. A protocol error is a failure message, never an index panic.
+fn arg(args : Array[@abi.Value], i : Int) -> @abi.Value? {
+  if i < args.length() {
+    Some(args[i])
+  } else {
+    None
+  }
+}
+
+///|
+/// The dispatcher. Symbol names are `<package>::<declaration>`, with the
+/// receiver type inserted for a method, so a host can address any package in
+/// the guest without a registration step.
 fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
-  let args = @abi.decode(payload) catch {
+  let args = try {
+    @abi.decode(payload)
+  } catch {
     _ => return @abi.Failed("malformed argument frame")
   }
   let argv = match args {
     @abi.List(items) => items
     _ => [args]
   }
-  if argv.length() == 0 {
-    return @abi.Failed("no arguments")
-  }
   match symbol {
-    "json.parse" =>
-      match argv[0].as_string() {
-        Some(text) =>
-          try {
-            let doc = @json.parse(text[:])
-            @abi.Ok(@abi.Handle(handles.insert(doc)))
-          } catch {
-            error => @abi.Failed(error.to_string())
+    "moonbitlang/core/json::parse" =>
+      match arg(argv, 0) {
+        Some(v) =>
+          match v.as_string() {
+            Some(text) =>
+              try {
+                let doc = @json.parse(text[:])
+                @abi.Ok(@abi.Handle(handles.insert(doc)))
+              } catch {
+                error => @abi.Failed(error.to_string())
+              }
+            None => @abi.Failed("parse expects a string")
           }
-        None => @abi.Failed("json.parse expects a string")
+        None => @abi.Failed("parse expects one argument")
       }
-    "json.stringify" =>
-      match argv[0].as_handle() {
-        Some(id) =>
-          match handles.get(id) {
-            Some(doc) => @abi.Ok(@abi.Str(doc.stringify()))
-            None => @abi.Failed("stale handle")
+    "moonbitlang/core/json::Json::stringify" =>
+      match arg(argv, 0) {
+        Some(v) =>
+          match v.as_handle() {
+            Some(id) =>
+              match handles.get(id) {
+                Some(doc) => @abi.Ok(@abi.Str(doc.stringify()))
+                None => @abi.Failed("stale handle")
+              }
+            None => @abi.Failed("stringify expects a Json handle")
           }
-        None => @abi.Failed("json.stringify expects a handle")
+        None => @abi.Failed("stringify expects one argument")
       }
-    "json.valid" =>
-      match argv[0].as_string() {
-        Some(text) => @abi.Ok(@abi.Bool(@json.valid(text[:])))
-        None => @abi.Failed("json.valid expects a string")
+    "moonbitlang/core/json::valid" =>
+      match arg(argv, 0) {
+        Some(v) =>
+          match v.as_string() {
+            Some(text) => @abi.Ok(@abi.Bool(@json.valid(text[:])))
+            None => @abi.Failed("valid expects a string")
+          }
+        None => @abi.Failed("valid expects one argument")
       }
     "abi.release" =>
-      match argv[0].as_list() {
-        Some(items) => {
-          let mut released = 0
-          for item in items {
-            match item.as_int() {
-              Some(id) => if handles.release(id) { released = released + 1 }
-              None => ()
+      match arg(argv, 0) {
+        Some(v) =>
+          match v.as_list() {
+            Some(items) => {
+              let mut released = 0
+              for item in items {
+                // A batch normally arrives as plain integers. A handle-tagged
+                // id means the same thing, and refusing it would turn a
+                // release into a silent no-op — the one failure mode a leak
+                // test must never see.
+                let id = match item.as_int() {
+                  Some(n) => Some(n)
+                  None => item.as_handle()
+                }
+                match id {
+                  Some(id) =>
+                    if handles.release(id) {
+                      released = released + 1
+                    }
+                  None => ()
+                }
+              }
+              @abi.Ok(@abi.Int(released))
             }
+            None => @abi.Failed("abi.release expects a list of handle ids")
           }
-          @abi.Ok(@abi.Int(released))
-        }
-        None => @abi.Failed("abi.release expects a list of handle ids")
+        None => @abi.Ok(@abi.Int(0))
       }
     "abi.live" => @abi.Ok(@abi.Int(handles.live_count()))
     "bench.echo" =>
-      // The floor of the protocol: decode one value, encode the same value.
+      // The floor of the protocol: decode one value and encode it back.
       // Anything measured against this is the cost of real work, not of the
       // boundary.
-      @abi.Ok(argv[0])
+      match arg(argv, 0) {
+        Some(v) => @abi.Ok(v)
+        None => @abi.Ok(@abi.Null)
+      }
     "bench.sum" =>
-      match argv[0].as_int() {
-        Some(n) => @abi.Ok(@abi.Int(n * (n + 1) / 2))
-        None => @abi.Failed("bench.sum expects an int")
+      match arg(argv, 0) {
+        Some(v) =>
+          match v.as_int() {
+            Some(n) => @abi.Ok(@abi.Int(n * (n + 1) / 2))
+            None => @abi.Failed("bench.sum expects an int")
+          }
+        None => @abi.Failed("bench.sum expects one argument")
       }
     _ => @abi.Failed("unknown symbol " + symbol)
   }

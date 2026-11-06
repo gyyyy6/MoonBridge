@@ -19,12 +19,14 @@
 //! so one `HandleTable[Json]` per module is exactly the right granularity.
 //!
 //! ```text
-//!   id = (slot << 10) | generation
+//!   id = (slot << 10) | generation,  generation >= 1
 //! ```
 //!
 //! Ten bits of generation covers 1024 releases per slot, and 20 bits of slot
 //! covers a million live objects — far past what a Python caller will hold
-//! before the table is asked to grow instead.
+//! before the table is asked to grow instead. Generation 0 is reserved: a
+//! handle of 0 has to mean "no object" on the host side, so no live handle may
+//! carry it.
 
 ///|
 /// Bits reserved for the generation counter in a handle id.
@@ -73,9 +75,11 @@ pub fn[T] HandleTable::insert(
         raise HandleTableFull(MAX_SLOTS)
       }
       self.slots.push(Some(value))
-      self.gens.push(0)
+      // The first handle to a slot is generation 1, never 0: the host reads a
+      // handle of 0 as "no object", so id 0 must not exist.
+      self.gens.push(1)
       self.live = self.live + 1
-      slot << GEN_BITS
+      (slot << GEN_BITS) | 1
     }
   }
 }
