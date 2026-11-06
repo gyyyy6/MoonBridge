@@ -1,0 +1,8 @@
+import {
+  "gyyyy6/moonbridge/map",
+  "gyyyy6/moonbridge/mbti",
+}
+
+pkgtype(kind: "library")
+
+warnings = "-79"
