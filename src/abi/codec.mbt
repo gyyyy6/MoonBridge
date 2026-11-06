@@ -266,6 +266,13 @@ pub(all) enum Status {
   Ok(Value)
   /// The guest raised a `suberror`; the string is its rendered message.
   Failed(String)
+  /// The same, but the guest also knows what it raised.
+  ///
+  /// The type name is what lets Python raise the generated exception class
+  /// instead of a catch-all, so `except ParseError` works. It travels as a map
+  /// rather than as a new frame layout: the payload of a failure was always a
+  /// `Value`, and a map is a value.
+  FailedAs(String, String)
   /// The guest panicked or hit an unreachable state.
   Panicked(String)
 } derive(Debug)
@@ -291,12 +298,49 @@ pub fn encode_status(status : Status) -> Bytes {
       buf.write_byte(STATUS_FAILED.to_byte())
       write_value(buf, Str(message))
     }
+    FailedAs(kind, message) => {
+      buf.write_byte(STATUS_FAILED.to_byte())
+      write_value(
+        buf,
+        Map([(Str("type"), Str(kind)), (Str("message"), Str(message))]),
+      )
+    }
     Panicked(message) => {
       buf.write_byte(STATUS_PANIC.to_byte())
       write_value(buf, Str(message))
     }
   }
   buf.to_bytes()
+}
+
+///|
+/// Reads a failure payload, which is either a bare message or a map naming the
+/// type. The bare form is what an older guest sends, and accepting both costs
+/// one `match`.
+fn failure_of(value : Value) -> (String, String)? {
+  match value {
+    Str(message) => Some(("", message))
+    Map(pairs) => {
+      let mut kind = ""
+      let mut message = ""
+      let mut ok = true
+      for pair in pairs {
+        let (key, item) = pair
+        match (key.as_string(), item.as_string()) {
+          (Some("type"), Some(v)) => kind = v
+          (Some("message"), Some(v)) => message = v
+          (Some(_), Some(_)) => ()
+          _ => ok = false
+        }
+      }
+      if ok {
+        Some((kind, message))
+      } else {
+        None
+      }
+    }
+    _ => None
+  }
 }
 
 ///|
@@ -310,8 +354,11 @@ pub fn decode_status(data : Bytes) -> Status raise DecodeError {
   match tag {
     STATUS_OK => Ok(payload)
     STATUS_FAILED =>
-      match payload.as_string() {
-        Some(message) => Failed(message)
+      match failure_of(payload) {
+        // A guest that only knows the message keeps the old shape, so the
+        // typed form is an addition rather than a break.
+        Some(("", message)) => Failed(message)
+        Some((kind, message)) => FailedAs(kind, message)
         None => raise DecodeError("failure without a message")
       }
     STATUS_PANIC =>
