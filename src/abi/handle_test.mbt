@@ -34,6 +34,30 @@ test "no live handle is ever zero" {
 }
 
 ///|
+test "a slot that runs out of generations is retired, never wrapped" {
+  // 1024 is the generation field's width. Wrapping it would put generation 0
+  // back on the table, and for slot 0 that is id 0 — the value the host reads
+  // as "no object". A thousand parses and closes was enough to hit it, and the
+  // symptom was one document that `close()` appeared not to release.
+  let t : @abi.HandleTable[Int32] = @abi.HandleTable::new()
+  let mut i = 0
+  let mut zero = 0
+  while i < 5000 {
+    let id = t.insert(i)
+    if id == 0 {
+      zero = zero + 1
+    }
+    ignore(t.release(id))
+    i = i + 1
+  }
+  assert_eq(zero, 0)
+  assert_eq(t.live_count(), 0)
+  // Retiring is the price of never wrapping, so it has to be visible.
+  assert_true(t.retired_count() > 0)
+  assert_true(t.capacity() > t.retired_count())
+}
+
+///|
 test "a released handle stops resolving" {  let t : @abi.HandleTable[String] = @abi.HandleTable::new()
   let id = t.insert("gone")
   assert_true(t.release(id))

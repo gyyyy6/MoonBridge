@@ -48,11 +48,13 @@ pub(all) struct HandleTable[T] {
   free : Array[Int32]
   /// Objects currently held. This is the number the leak test watches.
   mut live : Int32
+  /// Slots whose generation counter ran out and will never be reused.
+  mut retired : Int32
 }
 
 ///|
 pub fn[T] HandleTable::new() -> HandleTable[T] {
-  { slots: [], gens: [], free: [], live: 0, }
+  { slots: [], gens: [], free: [], live: 0, retired: 0, }
 }
 
 ///|
@@ -122,11 +124,34 @@ pub fn[T] HandleTable::release(self : HandleTable[T], id : Int32) -> Bool {
       self.slots[slot] = None
       // Bumping the generation is what makes the id just released, and every
       // earlier handle to that slot, fail to resolve from now on.
-      self.gens[slot] = (gen + 1) & GEN_MASK
-      self.free.push(slot)
+      self.bump(slot)
       self.live = self.live - 1
       true
     }
+  }
+}
+
+///|
+/// Advances a slot's generation, or retires the slot when it has served
+/// `GEN_MASK` lifetimes.
+///
+/// Wrapping the counter would put generation 0 back on the table, and for slot
+/// 0 that is handle id 0 — the value the host reads as "no object", where it
+/// skips the finalizer and returns from `close()` before releasing anything.
+/// The benchmark found it exactly: one document leaked out of every 1023, and
+/// the leak looked like a bug in `close()`.
+///
+/// Retiring the slot instead costs one 8-byte slot per 1023 objects that pass
+/// through the same slot, which is nothing next to silently dropping a release.
+fn[T] HandleTable::bump(self : HandleTable[T], slot : Int32) -> Unit {
+  let next = self.gen_at(slot) + 1
+  if next > GEN_MASK {
+    // Stay at the last generation and never hand the slot out again: any id
+    // that could still resolve to it is one this table has already retired.
+    self.retired = self.retired + 1
+  } else {
+    self.gens[slot] = next
+    self.free.push(slot)
   }
 }
 
@@ -135,9 +160,15 @@ pub fn[T] HandleTable::release(self : HandleTable[T], id : Int32) -> Bool {
 pub fn[T] HandleTable::release_all(self : HandleTable[T]) -> Unit {
   let mut slot = 0
   while slot < self.slots.length() {
-    self.slots[slot] = None
-    self.gens[slot] = (self.gen_at(slot) + 1) & GEN_MASK
-    self.free.push(slot)
+    match self.slots[slot] {
+      // An empty slot has nothing to release, and bumping it again would
+      // retire it early.
+      None => ()
+      Some(_) => {
+        self.slots[slot] = None
+        self.bump(slot)
+      }
+    }
     slot = slot + 1
   }
   self.live = 0
@@ -146,6 +177,13 @@ pub fn[T] HandleTable::release_all(self : HandleTable[T]) -> Unit {
 ///|
 pub fn[T] HandleTable::live_count(self : HandleTable[T]) -> Int32 {
   self.live
+}
+
+///|
+/// Slots that can never be handed out again. Non-zero only after a slot has
+/// served a thousand lifetimes, which is worth reporting rather than hiding.
+pub fn[T] HandleTable::retired_count(self : HandleTable[T]) -> Int32 {
+  self.retired
 }
 
 ///|
