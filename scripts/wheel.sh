@@ -65,7 +65,11 @@ cp -r "$OUT/moonbridge" "$STAGE/moonbridge"
 # The binary goes inside the package, so `moonbridge.install()` finds it with
 # nothing but `__file__`.
 cp "$WASM" "$STAGE/moonbridge/_guest.wasm"
-cp pack/pyproject.toml pack/moonbridge_build.py "$STAGE/"
+cp pack/moonbridge_build.py "$STAGE/"
+# The version is patched rather than copied, so the staged `pyproject.toml`
+# cannot disagree with `moon.mod` — the backend reads the JSON, but a human
+# reading the project file should not be told a different number.
+sed "s|^version = .*|version = \"$VERSION\"|" pack/pyproject.toml > "$STAGE/pyproject.toml"
 cat > "$STAGE/moonbridge_wheel.json" <<JSON
 {
   "name": "moonbridge",
