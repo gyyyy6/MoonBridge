@@ -49,7 +49,9 @@ fn bind_of(src : String) -> @gen.Stub raise {
 ///|
 test "the module announces itself and imports its own runtime" {
   let stub = bind_of("package \"acme/core\"\n\npub fn ping() -> Int\n")
-  assert_true(has_bind(stub.text, "Bindings that call into the MoonBit package"))
+  assert_true(
+    has_bind(stub.text, "Bindings that call into the MoonBit package"),
+  )
   // Deferred annotations are what let two generated modules import each other
   // without either of them being evaluated in the middle of the import.
   assert_true(has_bind(stub.text, "from __future__ import annotations"))
@@ -60,12 +62,14 @@ test "the module announces itself and imports its own runtime" {
 
 ///|
 test "a module function forwards to its own symbol" {
-  let stub = bind_of("package \"acme/core\"\n\npub fn label(p : Int) -> String\n")
+  let stub = bind_of(
+    "package \"acme/core\"\n\npub fn label(p : Int) -> String\n",
+  )
   assert_true(
     has_bind(
       stub.text,
       "def label(p: int, /) -> str:\n" +
-      "    return _runtime.default().request(\"acme/core::label\", [p])",
+      "    return cast(str, _runtime.default().request(\"acme/core::label\", [p]))",
     ),
   )
 }
@@ -100,7 +104,7 @@ test "a method passes its receiver and names the declaring package" {
     has_bind(
       stub.text,
       "    def norm(self, /) -> float:\n" +
-      "        return _runtime.default().request(\"acme/core::Point::norm\", [self])",
+      "        return cast(float, _runtime.default().request(\"acme/core::Point::norm\", [self]))",
     ),
   )
 }
@@ -115,7 +119,9 @@ test "an associated function is static and returns a wrapped handle" {
     "pub fn Point::Point(x : Int) -> Point\n",
   )
   // `Point::Point` would shadow the class inside its own body, so it is `new`.
-  assert_true(has_bind(stub.text, "    @staticmethod\n    def new(x: int, /) -> Point:"))
+  assert_true(
+    has_bind(stub.text, "    @staticmethod\n    def new(x: int, /) -> Point:"),
+  )
   assert_true(
     has_bind(
       stub.text,
@@ -144,38 +150,37 @@ test "fields and constructors are declared but not bound" {
 ///|
 test "a cross-package handle is wrapped in the class its own module defines" {
   let world = @map.World::build([
-    @mbti
-      .parse_result(
-        "package \"acme/base\"\n\npub(all) struct Gadget {\n  size : Int\n}\n",
-      )
-      .unwrap(),
-    @mbti
-      .parse_result(
-        "package \"acme/ext\"\n" +
-        "\n" +
-        "import {\n  \"acme/base\",\n}\n" +
-        "\n" +
-        "pub fn make(n : Int) -> @base.Gadget\n",
-      )
-      .unwrap(),
+    @mbti.parse_result(
+      "package \"acme/base\"\n\npub(all) struct Gadget {\n  size : Int\n}\n",
+    ).unwrap(),
+    @mbti.parse_result(
+      "package \"acme/ext\"\n" +
+      "\n" +
+      "import {\n  \"acme/base\",\n}\n" +
+      "\n" +
+      "pub fn make(n : Int) -> @base.Gadget\n",
+    ).unwrap(),
   ])
   let stub = @gen.bind_with(
     Some(world),
-    @mbti
-      .parse_result(
-        "package \"acme/ext\"\n" +
-        "\n" +
-        "import {\n  \"acme/base\",\n}\n" +
-        "\n" +
-        "pub fn make(n : Int) -> @base.Gadget\n",
-      )
-      .unwrap(),
+    @mbti.parse_result(
+      "package \"acme/ext\"\n" +
+      "\n" +
+      "import {\n  \"acme/base\",\n}\n" +
+      "\n" +
+      "pub fn make(n : Int) -> @base.Gadget\n",
+    ).unwrap(),
     @gen.GenOptions::standard(),
   )
   // The sibling is imported at the top for the type checker and again inside
   // the body for the interpreter, which is what keeps two modules that
   // reference each other importable.
-  assert_true(has_bind(stub.text, "if TYPE_CHECKING:\n    from . import acme__base as _acme__base"))
+  assert_true(
+    has_bind(
+      stub.text,
+      "if TYPE_CHECKING:\n    from . import acme__base as _acme__base",
+    ),
+  )
   assert_true(
     has_bind(
       stub.text,
@@ -190,8 +195,7 @@ test "a cross-package handle is wrapped in the class its own module defines" {
 test "a trait protocol keeps an ellipsis body in both outputs" {
   // A Protocol has no guest object to dispatch to; `...` is the body Python
   // expects, so the module must not try to call one.
-  let src =
-    "package \"acme/core\"\n" +
+  let src = "package \"acme/core\"\n" +
     "\n" +
     "pub(open) trait Show {\n  to_string(Self) -> String\n}\n"
   let stub = bind_of(src)
@@ -204,7 +208,8 @@ test "the module and the stub agree on every callable name" {
   let stub = @gen.generate(core_pkg(), @gen.GenOptions::standard())
   let bind = @gen.bind_with(None, core_pkg(), @gen.GenOptions::standard())
   // Same walk, same names: whatever the stub promises, the module can answer.
-  for name in ["def label(", "def norm(", "def area(", "def report(", "def new("] {
+  for
+    name in ["def label(", "def norm(", "def area(", "def report(", "def new("] {
     assert_true(has_bind(stub.text, name))
     assert_true(has_bind(bind.text, name))
   }

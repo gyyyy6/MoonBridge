@@ -58,7 +58,8 @@ test "a slot that runs out of generations is retired, never wrapped" {
 }
 
 ///|
-test "a released handle stops resolving" {  let t : @abi.HandleTable[String] = @abi.HandleTable::new()
+test "a released handle stops resolving" {
+  let t : @abi.HandleTable[String] = @abi.HandleTable::new()
   let id = t.insert("gone")
   assert_true(t.release(id))
   assert_eq(t.get(id), None)

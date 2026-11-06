@@ -42,7 +42,7 @@ priv struct Buffers {
 }
 
 ///|
-let buffers : Buffers = { inbox: Bytes::new(1024) }
+let buffers : Buffers = { inbox: Bytes::new(1024), }
 
 ///|
 /// A fingerprinted buffer the host probes once at start-up to learn where the
@@ -145,7 +145,7 @@ fn slice(b : Bytes, start : Int32, end : Int32) -> Bytes {
 ///|
 /// `args[i]`, or `None` when the caller sent fewer arguments than the symbol
 /// needs. A protocol error is a failure message, never an index panic.
-fn arg(args : Array[@abi.Value], i : Int) -> @abi.Value? {
+fn arg(args : Array[@abi.Value], i : Int32) -> @abi.Value? {
   if i < args.length() {
     Some(args[i])
   } else {
@@ -158,9 +158,7 @@ fn arg(args : Array[@abi.Value], i : Int) -> @abi.Value? {
 /// receiver type inserted for a method, so a host can address any package in
 /// the guest without a registration step.
 fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
-  let args = try {
-    @abi.decode(payload)
-  } catch {
+  let args = @abi.decode(payload) catch {
     _ => return @abi.Failed("malformed argument frame")
   }
   let argv = match args {
@@ -221,10 +219,7 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
                   None => item.as_handle()
                 }
                 match id {
-                  Some(id) =>
-                    if handles.release(id) {
-                      released = released + 1
-                    }
+                  Some(id) => if handles.release(id) { released = released + 1 }
                   None => ()
                 }
               }

@@ -343,7 +343,8 @@ fn Emitter::decl(self : Emitter, decl : @mbti.Decl) -> Unit {
         // class in this package has no place to live.
         Some(_) => ()
         None =>
-          match self.render_func(f, None, None, self.pkg_name, None, self.mapper) {
+          match
+            self.render_func(f, None, None, self.pkg_name, None, self.mapper) {
             Some(block) => {
               self.blocks.push(block)
               self.func_count = self.func_count + 1
@@ -459,6 +460,10 @@ fn body_of(doc : String, members : Array[String]) -> String {
 priv struct Sig {
   text : String
   names : Array[String]
+  /// The return type as it was actually written, after a type variable that
+  /// could not be inferred was degraded. The body has to agree with the
+  /// signature, not with what the interface wanted.
+  ret : @map.PyType
 }
 
 ///|
@@ -563,7 +568,7 @@ fn Emitter::signature(
     sb.write_string(", " + join(kw, ", "))
   }
   sb.write_string(") -> " + ret_ty.render())
-  { text: sb.to_string(), names: all_names }
+  { text: sb.to_string(), names: all_names, ret: ret_ty, }
 }
 
 ///|
@@ -596,12 +601,12 @@ fn Emitter::finish(
   self : Emitter,
   sig : Sig,
   symbol : String,
-  ret : @map.PyType,
   indent : String,
 ) -> String {
   match self.output {
     Stub => sig.text + ": ..."
     Bind => {
+      let ret = sig.ret
       let call = "_runtime.default().request(\"" +
         symbol +
         "\", [" +
@@ -624,7 +629,14 @@ fn Emitter::finish(
           }
           body.push("return _runtime.wrap(" + name + ", " + call + ")")
         }
-        _ => body.push("return " + call)
+        _ => {
+          // `request` is typed `Any`, and a strict checker rejects returning
+          // that from a function with a real return type. `cast` is the honest
+          // form of the claim the ABI already makes: the frame carries exactly
+          // the value the signature names.
+          self.typing_used.set("cast", true)
+          body.push("return cast(" + ret.render() + ", " + call + ")")
+        }
       }
       let sb = StringBuilder()
       sb.write_string(sig.text + ":")
@@ -675,7 +687,6 @@ fn Emitter::render_func(
       let rendered = self.finish(
         sig,
         decl_pkg + "::" + raw + "::" + f.name,
-        ret,
         "        ",
       )
       if has_receiver {
@@ -693,9 +704,7 @@ fn Emitter::render_func(
       }
       if self.claim(name) {
         let sig = self.signature(name, false, scoped, f.generics, f.params, ret)
-        Some(
-          self.finish(sig, self.pkg_name + "::" + f.name, ret, "    "),
-        )
+        Some(self.finish(sig, self.pkg_name + "::" + f.name, "    "))
       } else {
         None
       }
@@ -1120,13 +1129,19 @@ fn Emitter::assemble(self : Emitter) -> String {
   }
   let typing_names : Array[String] = []
   for
-    name in ["Any", "Generic", "Optional", "Protocol", "Sequence", "TYPE_CHECKING", "TypeAlias"] {
+    name in [
+      "Any", "Generic", "Optional", "Protocol", "Sequence", "TYPE_CHECKING", "TypeAlias",
+    ] {
     if self.typing_used.contains(name) {
       typing_names.push(name)
     }
   }
   if self.typevars.length() > 0 {
     typing_names.push("TypeVar")
+  }
+  // `cast` is the one lowercase name in the list, so it sorts last.
+  if self.typing_used.contains("cast") {
+    typing_names.push("cast")
   }
   if typing_names.length() > 0 {
     sb.write_string("\nfrom typing import " + join(typing_names, ", ") + "\n")
