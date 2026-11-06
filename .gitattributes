@@ -1,0 +1,6 @@
+# Normalize line endings: everything is LF except binaries.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.wasm binary
+*.ico binary
