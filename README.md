@@ -14,11 +14,13 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
                                             wasm 模块 / native 库
 ```
 
-> 状态：**S0 通过、S1 通过**（2026-11-06）。
+> 状态：**S0 通过、S1 通过、S2 通过**（2026-11-06）。
 > S0：调用 ABI、内存共享、宿主↔MoonBit 字节流、UTF-8 往返全部跑通，实测见
 > [spikes/01-wasm-python](spikes/01-wasm-python/)。
 > S1：`.mbti` 解析器 + 类型图，在 **501 个真实接口文件 / 17,793 条声明**上 100% 通过，
 > 见 [S1 语料报告](docs/s1-corpus-report.md)。
+> S2：类型映射 + Python 代码生成，**501 个包生成 stub，`mypy --strict` 0 报错**，
+> 见 [S2 映射与生成](docs/s2-type-mapping.md)。
 
 ---
 
@@ -94,6 +96,37 @@ bash scripts/corpus.sh all
 **哪些类型互相递归必须一起产**（`cycles`，Tarjan SCC）、
 **哪些类型不在本包**（`external_names`，交给宿主类型表）。
 
+## S2：类型映射与 Python 代码生成
+
+解析出的类型图要变成 Python 能理解的东西，中间要过两道关：**类型映射**（MoonBit 类型
+→ Python 注解）和**命名**（MoonBit 标识符 → 合法且不遮蔽的 Python 标识符）。
+
+```text
+AST  ──typemap──▶ PyType ──render──▶ .pyi
+      │                              │
+   降级阶梯（4 级，每级都记账）        mypy --strict 校验
+```
+
+```bash
+# 全语料生成 + mypy strict（需要 python + mypy）
+bash scripts/gen.sh all
+bash scripts/gen.sh core    # 仅标准库，离线可跑
+```
+
+映射结果只有四种，按保真度从高到低：**直接对应**（`Int`→`int`）、**透明擦除**
+（`&T`、`T??`）、**句柄**（包内类型 → 生成类，值留在 MoonBit 堆上，跨边界的是不透明整数）、
+**降级为 `Any`**。第四级从不静默：每个 `Any` 都带一条原因记录，`--gen` 按原因汇总：
+
+```text
+stubs=501 failed=0 types=1937 funcs=4789 fields=3733 skipped=7
+degraded: foreign=4812 unknown=890 result=130 higher-order=699 arity=0 async=81
+```
+
+两处刻意的选择：函数类型降级为 `Any` 而**不是** `Callable`（没有回调蹦床，写 `Callable`
+等于承诺一条走不通的路）；stub 之间**互不 import**（MoonBit 包图含 48 个环，跨包类型走 `Any`，
+保证每个 `.pyi` 独立可检查）。完整映射表、命名规则、以及 mypy 逼出来的六类问题见
+[S2 映射与生成](docs/s2-type-mapping.md)。
+
 ## 开发
 
 ```bash
@@ -105,6 +138,9 @@ moon fmt --check
 # 语料（core 子集离线可跑；all 需要网络）
 bash scripts/corpus.sh core
 bash scripts/corpus.sh all
+
+# 生成 Python stub 并跑 mypy strict
+bash scripts/gen.sh all
 
 # Spike 复现（需要 Python 3.10+ 与 wasmtime）
 cd spikes/01-wasm-python/module && moon build --target wasm && cd ..
@@ -123,7 +159,8 @@ python bridge_test.py
 - [x] **S0** 宿主 ABI 可行性：wasm 导出、内存共享、UTF-8 往返
 - [x] **S1** 接口 IR：解析 `moon info`，覆盖 struct / enum / 泛型 / trait / 别名
       （501 个真实接口文件 100% 通过，见 [报告](docs/s1-corpus-report.md)）
-- [ ] **S2** 类型映射与代码生成：函数 + 值类型，生成 `.pyi` 并通过 mypy strict
+- [x] **S2** 类型映射与代码生成：501 个包生成 `.pyi`，`mypy --strict` 0 报错
+      （见 [报告](docs/s2-type-mapping.md)）
 - [ ] **S3** 句柄表与生命周期：`__del__` 回收、环引用、10 万次往返 0 泄漏
 - [ ] **S4** 集合 / `Option` / `Result` / 回调 / 异常映射
 - [ ] **S5** PEP 517 打包、真实包端到端、批量协议与基准
