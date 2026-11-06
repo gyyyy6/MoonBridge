@@ -27,6 +27,13 @@ python bridge_test.py module/_build/wasm/release/build/moonbridge-spike.wasm
 | 6 | UTF-8 往返 | `你好, MoonBit 🚀` → 13 码位 / 20 字节，往返字节一致 |
 | 7 | 调用开销 | 200k 次调用聚合计时，并与纯 wasm 基线对照 |
 
+基线由同目录的 `baseline_overhead.py` 生成（手工构造 `nop` / `id(i32)` 模块，
+用来区分"wasmtime 绑定层开销"与"MoonBit 代码开销"）：
+
+```bash
+python baseline_overhead.py
+```
+
 ## 关键发现
 
 **1. `String` / `Bytes` 参数在 wasm ABI 里是一个 `i32`。**
