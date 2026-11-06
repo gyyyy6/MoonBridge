@@ -514,7 +514,7 @@ pub fn render_host() -> String {
     #|
     #|__all__ = ["WasmHost", "open_runtime"]
     #|
-    #|#: Sentinel whose position reveals the data offset of a `Bytes` object.
+    #|#: Sentinel whose position reveals where a buffer object keeps its data.
     #|PROBE_MARKER = b"MOONBRIDGE-PROBE-DATA-OFFSET-0420"
     #|
     #|#: How far either side of the object pointer the probe looks.
@@ -545,12 +545,19 @@ pub fn render_host() -> String {
     #|        self._call: Any = exports["mb_call"]
     #|        self._live: Any = exports["mb_live_handles"]
     #|        self._probe: Any = exports["mb_probe"]
-    #|        self._data_offset = self._find_data_offset()
+    #|        self._probe_out: Any = exports["mb_probe_out"]
+    #|        # The input buffer is a `Bytes` and the response buffer is a
+    #|        # `FixedArray[Byte]`; the two layouts are not promised to match, so
+    #|        # each is measured rather than assumed.
+    #|        self._in_offset = self._find_data_offset(self._probe, "input")
+    #|        self._out_offset = self._find_data_offset(self._probe_out, "response")
     #|        self._in_ptr = 0
     #|        self._in_capacity = 0
+    #|        self._out_ptr = 0
+    #|        self._out_capacity = 0
     #|
-    #|    def _find_data_offset(self) -> int:
-    #|        pointer = int(self._probe(self._store))
+    #|    def _find_data_offset(self, probe: Any, what: str) -> int:
+    #|        pointer = int(probe(self._store))
     #|        start = max(0, pointer - 64)
     #|        allowed = bytes(
     #|            self._memory.read(self._store, start, pointer + PROBE_WINDOW)
@@ -558,7 +565,7 @@ pub fn render_host() -> String {
     #|        index = allowed.find(PROBE_MARKER)
     #|        if index < 0:
     #|            raise _runtime.MoonError(
-    #|                "could not locate the guest's buffer layout; "
+    #|                f"could not locate the guest's {what} buffer layout; "
     #|                "the MoonBit toolchain probably changed it"
     #|            )
     #|        return start + index - pointer
@@ -568,17 +575,25 @@ pub fn render_host() -> String {
     #|            self._in_ptr = int(self._in_reserve(self._store, size))
     #|            self._in_capacity = size
     #|
+    #|    def _ensure_output(self, size: int) -> None:
+    #|        """Refreshes the response pointer when the guest had to grow it."""
+    #|        if size > self._out_capacity:
+    #|            self._out_ptr = int(self._stage(self._store))
+    #|            # The guest grows the buffer to fit what it is publishing, so the
+    #|            # size just seen is a lower bound on what is now reserved. A
+    #|            # reallocation is always a growth, so this only asks again when a
+    #|            # larger response arrives than any before it.
+    #|            self._out_capacity = size
+    #|
     #|    def call(self, symbol: str, payload: bytes) -> bytes:
     #|        """Sends one frame and returns the response bytes."""
     #|        name = symbol.encode("utf-8")
     #|        frame = struct.pack("<I", len(name)) + name + payload
     #|        self._ensure_input(len(frame))
-    #|        self._memory.write(self._store, frame, self._in_ptr + self._data_offset)
+    #|        self._memory.write(self._store, frame, self._in_ptr + self._in_offset)
     #|        length = int(self._call(self._store, len(frame)))
-    #|        # The guest rebinds its staging buffer on every call, because MoonBit
-    #|        # `Bytes` is immutable, so the pointer has to be asked for each time.
-    #|        stage = int(self._stage(self._store))
-    #|        base = stage + self._data_offset
+    #|        self._ensure_output(length)
+    #|        base = self._out_ptr + self._out_offset
     #|        return bytes(self._memory.read(self._store, base, base + length))
     #|
     #|    def live_handles(self) -> int:

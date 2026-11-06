@@ -21,25 +21,44 @@
 //! binding always describe the same surface.
 
 ///|
-/// The two buffers the host reads and writes. MoonBit has no mutable top-level
-/// binding, so they live in a mutable record instead.
+/// The response buffer, as a one-element array so the guest can replace it.
+///
+/// It is a `FixedArray[Byte]`, not a `Bytes`, and that is the whole point.
+/// `Bytes` is immutable here, so publishing a response meant handing the host a
+/// freshly encoded object, one per call. Every object a guest export returns
+/// keeps a reference the host has no way to release, so each call left one
+/// response behind: `bench/bench.py` measured 41 bytes of guest memory per call
+/// growing without bound, with the handle table empty the whole time. A mutable
+/// array can be written in place, so the host is handed the same object every
+/// call and nothing accumulates.
+let out_slot : Array[FixedArray[Byte]] = [FixedArray::make(4096, b'\x00')]
+
+///|
+/// The input buffer, owned by the guest so the host never has to know how a
+/// MoonBit `Bytes` object is laid out beyond one discovered offset.
 priv struct Buffers {
-  /// Response buffer, reused across calls and grown only when a response does
-  /// not fit, so the host can cache its pointer and refresh it on growth only.
-  mut stage : Bytes
-  /// Input buffer, owned by the guest so the host never has to know how a
-  /// MoonBit `Bytes` object is laid out beyond one discovered offset.
+  /// Input buffer, grown on demand and kept for the session's lifetime.
   mut inbox : Bytes
 }
 
 ///|
-let buffers : Buffers = { stage: Bytes::new(256), inbox: Bytes::new(1024), }
+let buffers : Buffers = { inbox: Bytes::new(1024) }
 
 ///|
 /// A fingerprinted buffer the host probes once at start-up to learn where the
 /// data of a `Bytes` object lives. Held in a global so it is never collected
 /// while the host might look at it.
 let probe_bytes : Bytes = @utf8.encode("MOONBRIDGE-PROBE-DATA-OFFSET-0420")
+
+///|
+/// The same fingerprint as a `FixedArray[Byte]`. The two layouts are not
+/// promised to be identical, so the host measures each one instead of assuming.
+let probe_out : FixedArray[Byte] = {
+  let marker = @utf8.encode("MOONBRIDGE-PROBE-DATA-OFFSET-0420")
+  let arr : FixedArray[Byte] = FixedArray::make(marker.length(), b'\x00')
+  arr.blit_from_bytesview(0, marker[:])
+  arr
+}
 
 ///|
 /// Objects the host is holding. One table per concrete type, because MoonBit
@@ -62,8 +81,8 @@ pub fn in_reserve(n : Int32) -> Bytes {
 
 ///|
 #export_name("mb_stage")
-pub fn stage_ptr() -> Bytes {
-  buffers.stage
+pub fn stage_ptr() -> FixedArray[Byte] {
+  out_slot[0]
 }
 
 ///|
@@ -73,21 +92,40 @@ pub fn probe() -> Bytes {
 }
 
 ///|
+#export_name("mb_probe_out")
+pub fn probe_out_ptr() -> FixedArray[Byte] {
+  probe_out
+}
+
+///|
 #export_name("mb_live_handles")
 pub fn live_handles() -> Int32 {
   handles.live_count()
 }
 
 ///|
-/// Copies `src` into the staging buffer, growing it if needed, and returns the
+/// Copies `src` into the response buffer, growing it if needed, and returns the
 /// response length.
-/// MoonBit's `Bytes` is immutable in this core release, so the staged response
-/// is published by rebinding the handle rather than by copying into a fixed
-/// buffer. The host therefore asks for the staging pointer after every call;
-/// that second call is the price of not depending on a layout detail.
+///
+/// `Bytes` is immutable in this core release, so the response is copied into
+/// the array the host already has a pointer to rather than handed over as a new
+/// object. The copy is a `blit`, not a loop: the encoder writes into a `Bytes`,
+/// the host reads out of the array, and both are the same bytes in linear
+/// memory.
 fn publish(src : Bytes) -> Int32 {
-  buffers.stage = src
-  src.length()
+  let n = src.length()
+  let cur = out_slot[0]
+  if cur.length() < n {
+    let mut size = cur.length()
+    while size < n {
+      size = size * 2
+    }
+    // A new array means a new address: the host refreshes its pointer when the
+    // response no longer fits in the room it knows about.
+    out_slot[0] = FixedArray::make(size, b'\x00')
+  }
+  out_slot[0].blit_from_bytesview(0, src[:])
+  n
 }
 
 ///|
