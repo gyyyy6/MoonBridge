@@ -9,7 +9,7 @@ python -c "import moonbridge; moonbridge.install()"
 
 装完之后，调用方不需要知道 wasm、不需要找 `.py`、不需要设 `PYTHONPATH`。
 
-2026-11-07 实测：wheel 501,064 字节，508 个条目，`pip install` 后从仓库外
+2026-11-06 实测：wheel 501,064 字节，508 个条目，`pip install` 后从仓库外
 `import moonbridge` 成功，11 项功能断言全绿，`live=0`。
 
 ---

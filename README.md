@@ -14,7 +14,7 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
                                             wasm 模块 / native 库
 ```
 
-> 状态：**S0 通过、S1 通过、S2 通过、S3 通过、S4 通过、S5 通过、S6 通过**（2026-11-07）。
+> 状态：**S0 通过、S1 通过、S2 通过、S3 通过、S4 通过、S5 通过、S6 通过**（2026-11-06）。
 > S0：调用 ABI、内存共享、宿主↔MoonBit 字节流、UTF-8 往返全部跑通，实测见
 > [spikes/01-wasm-python](spikes/01-wasm-python/)。
 > S1：`.mbti` 解析器 + 类型图，在 **501 个真实接口文件 / 17,793 条声明**上 100% 通过，

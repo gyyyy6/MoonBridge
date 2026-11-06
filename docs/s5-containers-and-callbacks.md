@@ -9,7 +9,7 @@ S5 把这一格清掉。
 bash scripts/e2e.sh   # 现在会打一个 list、一个 dict、五个回调、一个 typed exception
 ```
 
-2026-11-07 实测：168 个 MoonBit 单测通过；`mypy --strict` 498 个文件 0 报错；
+2026-11-06 实测：168 个 MoonBit 单测通过；`mypy --strict` 498 个文件 0 报错；
 42 项端到端断言全绿（其中 13 项是 S5 新增的）；`dropped=0`。
 
 ---
