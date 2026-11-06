@@ -1,6 +1,12 @@
 import {
-  "moonbitlang/core/debug",
   "moonbitlang/core/encoding/utf8",
 }
 
 pkgtype(kind: "library")
+
+// The AST derives Debug and Eq for every node so black-box tests can compare
+// whole trees. This toolchain warns when derived impls become callable as
+// regular methods; that promotion is intentional here, so silence code 79
+// instead of writing an `extend` declaration for each of the ~30 AST types.
+
+warnings = "-79"

@@ -18,12 +18,6 @@ pub(all) struct Token {
 } derive(Debug, Eq)
 
 ///|
-/// Explicit promotion of the derived `Eq`/`Debug` impls, as required by the
-/// current toolchain (implicit promotion is deprecated).
-pub extend Token with Eq::{not_equal, equal}
-
-///|
-pub extend Token with @debug.Debug::{to_repr}
 
 ///|
 /// Token kinds produced by `tokenize`.
@@ -43,10 +37,8 @@ pub(all) enum Tok {
 } derive(Debug, Eq)
 
 ///|
-pub extend Tok with Eq::{not_equal, equal}
 
 ///|
-pub extend Tok with @debug.Debug::{to_repr}
 
 ///|
 fn is_digit(c : Int32) -> Bool {
