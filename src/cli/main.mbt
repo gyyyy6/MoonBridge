@@ -41,11 +41,14 @@ priv struct Tally {
   mut passed : Int32
   mut failed : Int32
   mut decls : Int32
+  mut types : Int32
+  mut edges : Int32
+  mut cyclic : Int32
 }
 
 ///|
 fn Tally::new() -> Tally {
-  { files: 0, passed: 0, failed: 0, decls: 0, }
+  { files: 0, passed: 0, failed: 0, decls: 0, types: 0, edges: 0, cyclic: 0, }
 }
 
 ///|
@@ -77,12 +80,17 @@ fn format_rate(rate : Double) -> String {
 fn main {
   let args = @env.args()
   let mut quiet = false
+  let mut want_graph = false
   let files : Array[String] = []
   let mut i = 2 // argv[0] is the node binary, argv[1] is this script
   while i < args.length() {
     let arg = args[i]
     if arg == "--quiet" {
       quiet = true
+    } else if arg == "--graph" {
+      // Also build the type graph, which is where a parse that "succeeded"
+      // but produced nonsense would show up.
+      want_graph = true
     } else if arg == "--list" && i + 1 < args.length() {
       // A manifest of paths, one per line: large corpora overflow argv.
       i = i + 1
@@ -117,6 +125,22 @@ fn main {
       Ok(pkg) => {
         tally.passed = tally.passed + 1
         tally.decls = tally.decls + pkg.decls.length()
+        let mut graph_note = ""
+        if want_graph {
+          let g = @mbti.TypeGraph::build(pkg)
+          tally.types = tally.types + g.node_count()
+          tally.edges = tally.edges + g.edge_count()
+          let cycles = g.cycles()
+          if cycles.length() > 0 {
+            tally.cyclic = tally.cyclic + 1
+          }
+          graph_note = "  types=" +
+            g.node_count().to_string() +
+            " edges=" +
+            g.edge_count().to_string() +
+            " cycles=" +
+            cycles.length().to_string()
+        }
         if !quiet {
           println(
             "ok   " +
@@ -132,7 +156,8 @@ fn main {
             " trait=" +
             pkg.count_kind("trait").to_string() +
             " impl=" +
-            pkg.count_kind("impl").to_string(),
+            pkg.count_kind("impl").to_string() +
+            graph_note,
           )
         }
       }
@@ -159,7 +184,17 @@ fn main {
     tally.decls.to_string() +
     " parse_rate=" +
     format_rate(rate) +
-    "%",
+    "%" +
+    (if want_graph {
+      " types=" +
+      tally.types.to_string() +
+      " edges=" +
+      tally.edges.to_string() +
+      " files_with_cycles=" +
+      tally.cyclic.to_string()
+    } else {
+      ""
+    }),
   )
   if tally.failed > 0 {
     set_exit_code(1)
