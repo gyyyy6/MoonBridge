@@ -6,15 +6,22 @@ says they cost, and leave nothing behind.
 
 Three cases, from the floor up:
 
-``echo``    the protocol and nothing else: decode one value, encode it back.
-``valid``   a real string in, a real bool out, no object lifetime at all.
+``valid``   a real string in, a real bool out, no object lifetime at all. The
+            floor: one frame, no handle.
 ``parse``   a real document, a handle out, released again. This is the case
             where a leak would show up.
 ``parse/gc`` the same, with the release left to ``weakref.finalize`` and the
             batched collector instead of an explicit ``close()``.
 
+And three that exercise the S4 object model, where one "iteration" is several
+calls because the object is built and then read:
+
+``ctor+field``  construct a `Position`, read both fields, release it.
+``ctor/gc``     the same, with the release deferred to the collector.
+``setter``      construct a `StringScanner`, write `cursor`, read it back.
+
 Usage:
-    python bench/bench.py --package _gen --wasm _build/wasm/release/build/guest_json/guest_json.wasm
+    python bench/bench.py --package _gen --wasm _build/wasm/release/build/guest_gen/guest_gen.wasm
 
 The last section asserts. A non-zero exit code means the boundary leaked.
 """
@@ -30,6 +37,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 DOC = '{"name": "moonbridge", "tags": ["ffi", "codegen"], "count": 3, "ok": true}'
+TEXT = "hello world"
 CHECKPOINTS = (1_000, 5_000, 10_000, 25_000, 50_000, 100_000)
 
 #: The garbage-collected case deliberately lets a few wrappers survive the run
@@ -126,6 +134,7 @@ def main() -> int:
     sys.path.insert(0, str(Path(args.package).resolve()))
     from moonbridge import _runtime, _wasmtime  # noqa: PLC0415
     from moonbridge import moonbitlang__core__json as mjson  # noqa: PLC0415
+    from moonbridge import moonbitlang__core__lexbuf as mlex  # noqa: PLC0415
 
     global hook, hook_rt
     hook, hook_rt = _wasmtime.open_runtime(Path(args.wasm))
@@ -134,9 +143,6 @@ def main() -> int:
     calls = args.calls
     results: list[Result] = []
 
-    results.append(
-        measure("echo", calls, lambda i: hook_rt.request("bench.echo", [i]))
-    )
     results.append(measure("valid", calls, lambda i: mjson.valid(DOC)))
     results.append(
         measure(
@@ -164,6 +170,50 @@ def main() -> int:
     gc.collect()
     hook_rt.flush()
 
+    # S4: the object model. A `Position` is built by the guest, then read
+    # field by field: four frames per iteration (construct, two reads, release).
+    # The read is asserted, not just performed — a getter that returned the
+    # wrong field would still be fast, and speed is not the claim here.
+    def construct_and_read(i: int) -> None:
+        pos = mjson.Position(i % 97, i % 89)
+        if pos.line != i % 97 or pos.column != i % 89:
+            raise AssertionError(f"field mismatch at {i}")
+        pos.close()
+
+    results.append(measure("ctor+field", calls, construct_and_read))
+
+    positions: list[object] = []
+
+    def construct_and_drop(i: int) -> None:
+        # Same object, released by the collector instead of by `close()`.
+        pos = mjson.Position(i % 97, i % 89)
+        if pos.line != i % 97:
+            raise AssertionError(f"field mismatch at {i}")
+        if i % 997 == 0:
+            positions.append(pos)
+            if len(positions) > SURVIVORS:
+                positions.pop(0)
+
+    results.append(measure("ctor/gc", calls, construct_and_drop))
+    positions.clear()
+    gc.collect()
+    hook_rt.flush()
+
+    # A mutable field is the one shape that writes back into the guest object,
+    # so it gets its own case: read, write, read back.
+    def write_field(i: int) -> None:
+        scan = mlex.StringScanner(TEXT, 0)
+        if scan.cursor != 0:
+            raise AssertionError(f"fresh scanner at {scan.cursor}")
+        scan.cursor = i % 11
+        if scan.cursor != i % 11:
+            raise AssertionError(f"cursor did not take: {scan.cursor}")
+        scan.close()
+
+    results.append(measure("setter", calls, write_field))
+    gc.collect()
+    hook_rt.flush()
+
     report(results)
 
     failures = 0
@@ -175,13 +225,22 @@ def main() -> int:
             failures += 1
 
     for r in results:
-        expected = SURVIVORS if r.name == "parse/gc" else 0
+        expected = SURVIVORS if r.name in ("parse/gc", "ctor/gc") else 0
         check(
             f"{r.name} released everything",
             r.live_end == expected,
             f"live={r.live_end}"
             + (f" ({expected} held on purpose)" if expected else ""),
         )
+
+    # A release the guest could not route is worse than one still pending: it
+    # looks like success on this side and leaks on the other. `dropped` is the
+    # only number that distinguishes the two, so it is asserted separately.
+    check(
+        "every release reached a table",
+        hook_rt.dropped == 0,
+        f"dropped={hook_rt.dropped} of {hook_rt.releases} released",
+    )
 
     final_live = hook.live_handles()
     check("guest is empty at the end", final_live == 0, f"live={final_live}")
@@ -200,7 +259,8 @@ def main() -> int:
     print()
     print(f"calls made through the boundary: {hook_rt.calls}")
     print(f"handles released by the batch collector: {hook_rt.releases}")
-    print(f"frames per second (valid): {calls / results[1].seconds:,.0f}")
+    floor = next(r for r in results if r.name == "valid")
+    print(f"frames per second (valid): {calls / floor.seconds:,.0f}")
 
     hook.close()
     hook_rt.close()
