@@ -53,7 +53,10 @@ pub(all) struct World {
 /// The alias a package path is imported under: the last segment, prefixed with
 /// `@`. `moonbitlang/core/json` is imported as `@json`, and the `.mbti` files
 /// confirm this holds for hyphenated names too (`@crater-core`).
-fn alias_of(path : String) -> String {
+///
+/// Public because the guest generator has to spell the same alias in the code
+/// it emits; two spellings of one rule would drift.
+pub fn pkg_alias(path : String) -> String {
   let parts = path.split("/").to_array()
   "@" + parts[parts.length() - 1].to_owned()
 }
@@ -96,7 +99,7 @@ pub fn World::build(pkgs : Array[@mbti.Package]) -> World {
   for pkg in pkgs {
     let aliases : Map[String, String] = Map([])
     for path in pkg.imports {
-      let at = alias_of(path)
+      let at = pkg_alias(path)
       match aliases.get(at) {
         // Two imports claim the same tail. Guessing one would silently point
         // annotations at the wrong package, so the alias becomes unresolved.
@@ -114,34 +117,16 @@ pub fn World::build(pkgs : Array[@mbti.Package]) -> World {
   // Pass two: methods, keyed by where the receiver lives rather than where the
   // method was written.
   for pkg in pkgs {
-    let info = w.info_of(pkg.name).unwrap()
     for decl in pkg.decls {
       match decl {
         @mbti.Decl::Func(f) =>
           match f.receiver {
             Some(r) => {
-              let home = match r.pkg {
-                Some(at) =>
-                  match info.aliases.get(at) {
-                    Some(path) => if path == "" { pkg.name } else { path }
-                    None =>
-                      if at == "@builtin" {
-                        builtin_pkg
-                      } else {
-                        pkg.name
-                      }
-                  }
-                // An unqualified receiver that the package does not declare
-                // can only come from the implicit prelude.
-                None =>
-                  if info.types.contains(r.name) {
-                    pkg.name
-                  } else if w.pkgs.contains(builtin_pkg) {
-                    builtin_pkg
-                  } else {
-                    pkg.name
-                  }
-              }
+              // A receiver that cannot be resolved at all still has to land
+              // somewhere the stub generator will look for it, so an unknown
+              // alias is treated as local. `home_of` returns `None` there; the
+              // indexing below keeps the old, forgiving answer.
+              let home = w.home_of(pkg.name, r).unwrap_or(pkg.name)
               let key = home + "::" + r.name
               let bucket = match w.methods.get(key) {
                 Some(b) => b
@@ -203,6 +188,51 @@ pub fn World::resolve_alias(self : World, pkg : String, at : String) -> String? 
         None => None
       }
     None => None
+  }
+}
+
+///|
+/// The package a type name belongs to, as seen from `pkg`.
+///
+/// Resolution has three cases, and they are not the same question:
+///
+/// - `@alias.Name` names a package explicitly. An unknown alias is `None`
+///   rather than a guess, because guessing points annotations at a package the
+///   author did not write.
+/// - A bare name the package declares is local.
+/// - Any other bare name can only come from the implicit prelude.
+///
+/// The stub generator and the guest generator both ask this one function, so a
+/// method can never land on a different class than the one the guest dispatches
+/// to.
+pub fn World::home_of(
+  self : World,
+  pkg : String,
+  name : @mbti.QName,
+) -> String? {
+  match name.pkg {
+    Some(at) => {
+      if at == "@builtin" {
+        return if self.pkgs.contains(builtin_pkg) {
+          Some(builtin_pkg)
+        } else {
+          None
+        }
+      }
+      self.resolve_alias(pkg, at)
+    }
+    None =>
+      match self.pkgs.get(pkg) {
+        Some(info) =>
+          if info.types.contains(name.name) {
+            Some(pkg)
+          } else if self.pkgs.contains(builtin_pkg) {
+            Some(builtin_pkg)
+          } else {
+            Some(pkg)
+          }
+        None => None
+      }
   }
 }
 
