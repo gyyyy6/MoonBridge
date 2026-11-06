@@ -1,5 +1,6 @@
 import {
   "gyyyy6/moonbridge/gen",
+  "gyyyy6/moonbridge/map",
   "gyyyy6/moonbridge/mbti",
   "moonbitlang/core/env",
 }

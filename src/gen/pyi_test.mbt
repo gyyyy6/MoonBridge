@@ -53,6 +53,8 @@ fn sample() -> String {
   "\n" +
   "pub fn Point::norm(Self) -> Double\n" +
   "\n" +
+  "pub fn Point::Point(x : Int, y : Double) -> Point\n" +
+  "\n" +
   "pub fn Point::scaled(Self, k? : Double, axis~ : String) -> Point\n" +
   "\n" +
   "pub fn[T] identity(x : T) -> T\n" +
@@ -149,6 +151,19 @@ test "trait becomes a protocol with the receiver dropped" {
   // `.mbti` prints the receiver as a leading `Self`; the stub turns it into
   // Python's `self` instead of emitting a second parameter.
   assert_true(contains(stub.text, "    def to_string(self, /) -> str: ..."))
+}
+
+///|
+test "associated functions are static and renamed new" {
+  let stub = stub_of(sample())
+  // `fn Point::Point(...)` constructs a Point; it must not take `self`, and it
+  // must not shadow the class name inside its own body.
+  assert_true(
+    contains(
+      stub.text,
+      "    @staticmethod\n    def new(x: int, y: float, /) -> Point: ...",
+    ),
+  )
 }
 
 ///|

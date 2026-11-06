@@ -137,6 +137,27 @@ priv struct Emitter {
 }
 
 ///|
+fn is_self_ty(ty : @mbti.TypeExpr) -> Bool {
+  match ty {
+    @mbti.TypeExpr::SelfType(_) => true
+    _ => false
+  }
+}
+
+///|
+/// The python name of a member. An associated function named after its own
+/// type would shadow the class inside its own body, so `fn T::T` becomes
+/// `T.new`.
+fn member_name(f : @mbti.FuncDecl, owner : String) -> String {
+  let name = @map.stub_name(f.name)
+  if name == owner {
+    "new"
+  } else {
+    name
+  }
+}
+
+///|
 /// `.mbti` prints the receiver as an explicit leading `Self` parameter:
 /// `fn Point::norm(Self) -> Double`. The stub turns it into Python's `self`,
 /// so the parameter list must lose that first entry.
@@ -144,11 +165,7 @@ fn drop_receiver(params : Array[@mbti.Param]) -> Array[@mbti.Param] {
   let out : Array[@mbti.Param] = []
   let mut first = true
   for p in params {
-    let is_self = match p.ty {
-      @mbti.TypeExpr::SelfType(_) => true
-      _ => false
-    }
-    if first && is_self {
+    if first && is_self_ty(p.ty) {
       first = false
       continue
     }
@@ -209,7 +226,7 @@ fn Emitter::claim(self : Emitter, name : String) -> Bool {
 
 ///|
 fn Emitter::typevar(self : Emitter, raw : String) -> String {
-  let name = @map.python_identifier(raw)
+  let name = @map.stub_name(raw)
   if !self.typevars.contains(name) {
     self.typevars.push(name)
   }
@@ -256,7 +273,7 @@ fn Emitter::decl(self : Emitter, decl : @mbti.Decl) -> Unit {
         // class in this package has no place to live.
         Some(_) => ()
         None =>
-          match self.render_func(f, None) {
+          match self.render_func(f, None, None) {
             Some(block) => {
               self.blocks.push(block)
               self.func_count = self.func_count + 1
@@ -265,19 +282,19 @@ fn Emitter::decl(self : Emitter, decl : @mbti.Decl) -> Unit {
           }
       }
     @mbti.Decl::Value(v) =>
-      if self.claim(@map.python_identifier(v.name)) {
+      if self.claim(@map.stub_name(v.name)) {
         let scoped = self.mapper.for_decl([], None)
         let ty = scoped.map(v.ty)
         self.note_type(ty)
-        self.blocks.push(@map.python_identifier(v.name) + ": " + ty.render())
+        self.blocks.push(@map.stub_name(v.name) + ": " + ty.render())
         self.func_count = self.func_count + 1
       }
     @mbti.Decl::Const(c) =>
-      if self.claim(@map.python_identifier(c.name)) {
+      if self.claim(@map.stub_name(c.name)) {
         let scoped = self.mapper.for_decl([], None)
         let ty = scoped.map(c.ty)
         self.note_type(ty)
-        self.blocks.push(@map.python_identifier(c.name) + ": " + ty.render())
+        self.blocks.push(@map.stub_name(c.name) + ": " + ty.render())
         self.func_count = self.func_count + 1
       }
     @mbti.Decl::Impl(_) => ()
@@ -366,38 +383,72 @@ fn Emitter::signature(
   name : String,
   is_method : Bool,
   scoped : @map.Mapper,
+  fn_generics : Array[@mbti.GenericParam],
   params : Array[@mbti.Param],
-  ret : String,
+  ret : @map.PyType,
 ) -> String {
+  let used : Map[String, Bool] = Map([])
+  if is_method {
+    used.set("self", true)
+  }
+  let types : Array[@map.PyType] = []
+  let names : Array[String] = []
+  let mut index = 0
+  for p in params {
+    let ty = scoped.map(p.ty)
+    self.note_type(ty)
+    types.push(ty)
+    let base = match p.name {
+      Some(n) => @map.stub_name(n)
+      None => "arg" + index.to_string()
+    }
+    // Two parameters can share a name in MoonBit (one positional, one
+    // labelled); Python would reject the duplicate.
+    let mut pname = base
+    let mut suffix = 2
+    while used.contains(pname) {
+      pname = base + "_" + suffix.to_string()
+      suffix = suffix + 1
+    }
+    used.set(pname, true)
+    names.push(pname)
+    index = index + 1
+  }
+  // A TypeVar that appears only in the return type cannot be inferred from the
+  // call, and mypy rejects the signature outright. Degrade that position to
+  // Any instead of shipping a stub that cannot type-check.
+  let bound : Map[String, Bool] = Map([])
+  for ty in types {
+    ty.collect_vars(bound)
+  }
+  let fn_vars : Map[String, Bool] = Map([])
+  for g in fn_generics {
+    fn_vars.set(@map.stub_name(g.name), true)
+  }
+  let ret_ty = ret.drop_unbound(fn_vars, bound)
+  self.note_type(ret_ty)
   let pos : Array[String] = []
   let kw : Array[String] = []
   if is_method {
     pos.push("self")
   }
-  let mut index = 0
-  for p in params {
-    let ty = scoped.map(p.ty)
-    self.note_type(ty)
-    let fallback = "arg" + index.to_string()
-    let pname = match p.name {
-      Some(n) => @map.python_identifier(n)
-      None => fallback
-    }
-    match p.kind {
-      @mbti.Positional => pos.push(pname + ": " + ty.render())
+  let mut i = 0
+  while i < types.length() {
+    match params[i].kind {
+      @mbti.Positional => pos.push(names[i] + ": " + types[i].render())
       @mbti.Optional => {
-        let ann = match ty {
-          @map.PyOptional(_) => ty.render()
+        let ann = match types[i] {
+          @map.PyOptional(_) => types[i].render()
           _ => {
             self.typing_used.set("Optional", true)
-            "Optional[" + ty.render() + "]"
+            "Optional[" + types[i].render() + "]"
           }
         }
-        kw.push(pname + ": " + ann + " = ...")
+        kw.push(names[i] + ": " + ann + " = ...")
       }
-      @mbti.Labeled => kw.push(pname + ": " + ty.render())
+      @mbti.Labeled => kw.push(names[i] + ": " + types[i].render())
     }
-    index = index + 1
+    i = i + 1
   }
   let sb = StringBuilder()
   sb.write_string("def " + name + "(")
@@ -413,7 +464,7 @@ fn Emitter::signature(
     sb.write_string("*")
     sb.write_string(", " + join(kw, ", "))
   }
-  sb.write_string(") -> " + ret + ": ...")
+  sb.write_string(") -> " + ret_ty.render() + ": ...")
   sb.to_string()
 }
 
@@ -422,20 +473,49 @@ fn Emitter::render_func(
   self : Emitter,
   f : @mbti.FuncDecl,
   owner : String?,
+  forced : String?,
 ) -> String? {
-  let name = @map.python_identifier(f.name)
   let scoped = self.mapper.for_decl(f.generics, owner)
   let ret = scoped.map(f.ret)
   self.note_type(ret)
-  let is_method = owner is Some(_)
-  let params = if is_method { drop_receiver(f.params) } else { f.params }
-  let rendered = self.signature(name, is_method, scoped, params, ret.render())
-  if is_method {
-    Some("    " + rendered)
-  } else if self.claim(name) {
-    Some(rendered)
-  } else {
-    None
+  match owner {
+    Some(owner_name) => {
+      let mut has_receiver = false
+      if f.params.length() > 0 {
+        has_receiver = is_self_ty(f.params[0].ty)
+      }
+      let params = if has_receiver { drop_receiver(f.params) } else { f.params }
+      let name = match forced {
+        Some(n) => n
+        None => member_name(f, owner_name)
+      }
+      let rendered = self.signature(
+        name,
+        has_receiver,
+        scoped,
+        f.generics,
+        params,
+        ret,
+      )
+      if has_receiver {
+        Some("    " + rendered)
+      } else {
+        // `fn T::new(...)` is an associated function, not a method: it takes no
+        // receiver, so the stub must not add one.
+        Some("    @staticmethod\n    " + rendered)
+      }
+    }
+    None => {
+      let name = match forced {
+        Some(n) => n
+        None => @map.stub_name(f.name)
+      }
+      if self.claim(name) {
+        Some(self.signature(name, false, scoped, f.generics, f.params, ret))
+      } else {
+        None
+      }
+    }
   }
 }
 
@@ -444,7 +524,7 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
   if s.access == @mbti.Private {
     return None
   }
-  let name = @map.python_identifier(s.name)
+  let name = @map.stub_name(s.name)
   if !self.claim(name) {
     return None
   }
@@ -465,7 +545,7 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
       field_names.push("field" + pos_index.to_string())
       pos_index = pos_index + 1
     } else {
-      field_names.push(@map.python_identifier(f.name))
+      field_names.push(@map.stub_name(f.name))
     }
   }
   let members : Array[String] = []
@@ -507,7 +587,11 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
     }
     i = i + 1
   }
-  self.attach_methods(name, s.generics, members)
+  let taken : Map[String, Bool] = Map([])
+  for fname in field_names {
+    taken.set(fname, true)
+  }
+  self.attach_methods(name, members, taken)
   let header = self.class_header(name, s.generics, [], false, true)
   Some(header + "\n" + body_of("MoonBit struct `" + s.name + "`.", members))
 }
@@ -516,31 +600,33 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
 fn Emitter::attach_methods(
   self : Emitter,
   class_name : String,
-  generics : Array[@mbti.GenericParam],
   members : Array[String],
+  taken : Map[String, Bool],
 ) -> Unit {
-  ignore(generics)
   let key = match self.receiver_key(class_name) {
     Some(k) => k
     None => return
   }
   match self.methods.get(key) {
     None => ()
-    Some(list) => {
-      let seen : Map[String, Bool] = Map([])
+    Some(list) =>
       for f in list {
-        let mname = @map.python_identifier(f.name)
-        if seen.contains(mname) {
-          self.skipped = self.skipped + 1
-          continue
+        let base = member_name(f, class_name)
+        // A field and a method may share a name in MoonBit, where the compiler
+        // tells them apart by call syntax. Python has one namespace, so the
+        // method moves aside rather than disappearing.
+        let mut name = base
+        let mut suffix = 2
+        while taken.contains(name) {
+          name = base + "_" + suffix.to_string()
+          suffix = suffix + 1
         }
-        seen.set(mname, true)
-        match self.render_func(f, Some(class_name)) {
+        taken.set(name, true)
+        match self.render_func(f, Some(class_name), Some(name)) {
           Some(text) => members.push(text)
           None => self.skipped = self.skipped + 1
         }
       }
-    }
   }
 }
 
@@ -548,7 +634,7 @@ fn Emitter::attach_methods(
 /// Maps a Python class name back to the MoonBit receiver name it stands for.
 fn Emitter::receiver_key(self : Emitter, class_name : String) -> String? {
   for name in self.methods.keys() {
-    if @map.python_identifier(name) == class_name {
+    if @map.stub_name(name) == class_name {
       return Some(name)
     }
   }
@@ -567,7 +653,7 @@ fn Emitter::render_enum(
   if access == @mbti.Private {
     return None
   }
-  let name = @map.python_identifier(raw_name)
+  let name = @map.stub_name(raw_name)
   if !self.claim(name) {
     return None
   }
@@ -580,7 +666,7 @@ fn Emitter::render_enum(
     let mut index = 0
     for f in ctors[0].fields {
       let fname = if f.name != "" {
-        @map.python_identifier(f.name)
+        @map.stub_name(f.name)
       } else if is_error && index == 0 {
         // The first payload of an error carries the message; naming it makes
         // `raise ParseError("...")` readable.
@@ -606,7 +692,11 @@ fn Emitter::render_enum(
     members.push("    @property")
     members.push("    def tag(self) -> str: ...")
   }
-  self.attach_methods(name, generics, members)
+  let taken : Map[String, Bool] = Map([])
+  if ctors.length() > 0 {
+    taken.set("tag", true)
+  }
+  self.attach_methods(name, members, taken)
   let header = self.class_header(name, generics, [], is_error, true)
   Some(
     header + "\n" + body_of("MoonBit " + kind + " `" + raw_name + "`.", members),
@@ -618,7 +708,7 @@ fn Emitter::render_trait(self : Emitter, t : @mbti.TraitDecl) -> String? {
   if t.access == @mbti.Private {
     return None
   }
-  let name = @map.python_identifier(t.name)
+  let name = @map.stub_name(t.name)
   if !self.claim(name) {
     return None
   }
@@ -627,7 +717,7 @@ fn Emitter::render_trait(self : Emitter, t : @mbti.TraitDecl) -> String? {
   let members : Array[String] = []
   let seen : Map[String, Bool] = Map([])
   for m in t.methods {
-    let mname = @map.python_identifier(m.name)
+    let mname = @map.stub_name(m.name)
     if seen.contains(mname) {
       continue
     }
@@ -640,7 +730,14 @@ fn Emitter::render_trait(self : Emitter, t : @mbti.TraitDecl) -> String? {
     self.note_type(ret)
     members.push(
       "    " +
-      self.signature(mname, true, scoped, drop_receiver(m.params), ret.render()),
+      self.signature(
+        mname,
+        true,
+        scoped,
+        m.generics,
+        drop_receiver(m.params),
+        ret,
+      ),
     )
   }
   let header = self.class_header(name, t.generics, ["Protocol"], false, false)
@@ -652,13 +749,14 @@ fn Emitter::render_opaque(self : Emitter, o : @mbti.OpaqueDecl) -> String? {
   if o.access == @mbti.Private {
     return None
   }
-  let name = @map.python_identifier(o.name)
+  let name = @map.stub_name(o.name)
   if !self.claim(name) {
     return None
   }
   self.type_count = self.type_count + 1
   let members : Array[String] = []
-  self.attach_methods(name, o.generics, members)
+  let taken : Map[String, Bool] = Map([])
+  self.attach_methods(name, members, taken)
   let header = self.class_header(name, o.generics, [], false, true)
   Some(
     header +
@@ -675,7 +773,7 @@ fn Emitter::render_alias(self : Emitter, a : @mbti.AliasDecl) -> String? {
   if a.access == @mbti.Private {
     return None
   }
-  let name = @map.python_identifier(a.name)
+  let name = @map.stub_name(a.name)
   if !self.claim(name) {
     return None
   }
@@ -696,7 +794,7 @@ fn Emitter::render_reexport(self : Emitter, r : @mbti.ReexportDecl) -> Unit {
     if entry.kind != "type" {
       continue
     }
-    let name = @map.python_identifier(entry.as_name.unwrap_or(entry.name))
+    let name = @map.stub_name(entry.as_name.unwrap_or(entry.name))
     if !self.claim(name) {
       continue
     }

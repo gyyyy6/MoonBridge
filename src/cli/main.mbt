@@ -110,7 +110,14 @@ priv struct GenTally {
   mut funcs : Int32
   mut fields : Int32
   mut skipped : Int32
-  mut degraded : Int32
+  mut foreign : Int32
+  mut unknown : Int32
+  mut higher_order : Int32
+  mut async_degraded : Int32
+  mut arity : Int32
+  mut result_erased : Int32
+  mut too_deep : Int32
+  mut unbound_self : Int32
 }
 
 ///|
@@ -122,7 +129,14 @@ fn GenTally::new() -> GenTally {
     funcs: 0,
     fields: 0,
     skipped: 0,
-    degraded: 0,
+    foreign: 0,
+    unknown: 0,
+    higher_order: 0,
+    async_degraded: 0,
+    arity: 0,
+    result_erased: 0,
+    too_deep: 0,
+    unbound_self: 0,
   }
 }
 
@@ -179,7 +193,19 @@ fn run_gen(files : Array[String], out_dir : String) -> Int32 {
         tally.funcs = tally.funcs + stub.funcs
         tally.fields = tally.fields + stub.fields
         tally.skipped = tally.skipped + stub.skipped
-        tally.degraded = tally.degraded + stub.degraded.length()
+        for reason in stub.degraded {
+          match reason {
+            @map.ForeignType(_) => tally.foreign = tally.foreign + 1
+            @map.UnknownType(_) => tally.unknown = tally.unknown + 1
+            @map.HigherOrderFunction =>
+              tally.higher_order = tally.higher_order + 1
+            @map.AsyncValue => tally.async_degraded = tally.async_degraded + 1
+            @map.ArityMismatch(_, _, _) => tally.arity = tally.arity + 1
+            @map.ResultErased => tally.result_erased = tally.result_erased + 1
+            @map.TooDeep => tally.too_deep = tally.too_deep + 1
+            @map.UnboundSelf => tally.unbound_self = tally.unbound_self + 1
+          }
+        }
       }
       Err(msg) => {
         tally.failed = tally.failed + 1
@@ -200,9 +226,25 @@ fn run_gen(files : Array[String], out_dir : String) -> Int32 {
     " fields=" +
     tally.fields.to_string() +
     " skipped=" +
-    tally.skipped.to_string() +
-    " degraded=" +
-    tally.degraded.to_string(),
+    tally.skipped.to_string(),
+  )
+  println(
+    "degraded: foreign=" +
+    tally.foreign.to_string() +
+    " unknown=" +
+    tally.unknown.to_string() +
+    " result=" +
+    tally.result_erased.to_string() +
+    " higher-order=" +
+    tally.higher_order.to_string() +
+    " arity=" +
+    tally.arity.to_string() +
+    " async=" +
+    tally.async_degraded.to_string() +
+    " too-deep=" +
+    tally.too_deep.to_string() +
+    " unbound-self=" +
+    tally.unbound_self.to_string(),
   )
   tally.failed
 }
