@@ -39,6 +39,9 @@ pub(all) enum PyType {
   PyDict(PyType, PyType)
   PyTuple(Array[PyType])
   PyOptional(PyType)
+  /// A MoonBit function value that crosses as a callable: parameter types and
+  /// return type, rendered as `Callable[[...], R]`.
+  PyCallable(Array[PyType], PyType)
   /// A generated class standing in for a MoonBit value: name plus type
   /// arguments, rendered as `Name` or `Name[Int]`.
   PyHandle(String, Array[PyType])
@@ -81,6 +84,8 @@ pub fn PyType::render(self : PyType) -> String {
         "tuple[" + render_types(items) + "]"
       }
     PyOptional(t) => "Optional[" + t.render() + "]"
+    PyCallable(params, ret) =>
+      "Callable[[" + render_types(params) + "], " + ret.render() + "]"
     PyHandle(name, args) =>
       if args.length() == 0 {
         name
@@ -101,6 +106,10 @@ pub fn PyType::collect_vars(self : PyType, out : Map[String, Bool]) -> Unit {
       v.collect_vars(out)
     }
     PyTuple(items) => items.each(fn(t) { t.collect_vars(out) })
+    PyCallable(params, ret) => {
+      params.each(fn(t) { t.collect_vars(out) })
+      ret.collect_vars(out)
+    }
     PyHandle(_, args) => args.each(fn(t) { t.collect_vars(out) })
     _ => ()
   }
@@ -133,9 +142,28 @@ pub fn PyType::drop_unbound(
       PyDict(k.drop_unbound(declared, bound), v.drop_unbound(declared, bound))
     PyTuple(items) =>
       PyTuple(items.map(fn(t) { t.drop_unbound(declared, bound) }))
+    PyCallable(params, ret) =>
+      PyCallable(
+        params.map(fn(t) { t.drop_unbound(declared, bound) }),
+        ret.drop_unbound(declared, bound),
+      )
     PyHandle(name, args) =>
       PyHandle(name, args.map(fn(t) { t.drop_unbound(declared, bound) }))
     _ => self
+  }
+}
+
+///|
+/// `true` when a type can be one side of a bridged callback.
+///
+/// The callback channel carries scalars — the guest's side is a wasm import
+/// with a frame built from the same codec — so a callback over a handle or a
+/// container is not something the bridge can honour.
+fn callable_part(t : PyType) -> Bool {
+  match t {
+    PyInt | PyFloat | PyBool | PyStr | PyNone => true
+    PyOptional(inner) => callable_part(inner)
+    _ => false
   }
 }
 
@@ -459,9 +487,30 @@ fn Mapper::map_at(self : Mapper, ty : @mbti.TypeExpr, depth : Int32) -> PyType {
         }
       }
     @mbti.TypeExpr::Tuple(items) => PyTuple(self.map_args(items, depth))
-    @mbti.TypeExpr::Func(_, _, _) => {
-      self.note(HigherOrderFunction)
-      PyAny
+    @mbti.TypeExpr::Func(params, ret, _) => {
+      // A callable crosses as an id plus a signature, which is exactly a Python
+      // `Callable`. It only does so for the scalar signatures the callback
+      // channel carries; anything else is still `Any`, because claiming a
+      // signature the guest refuses would be a lie at the call site.
+      let mapped : Array[PyType] = []
+      let mut spellable = true
+      for p in params {
+        let t = self.map_at(p.ty, depth + 1)
+        if !callable_part(t) {
+          spellable = false
+        }
+        mapped.push(t)
+      }
+      let mapped_ret = self.map_at(ret, depth + 1)
+      if !callable_part(mapped_ret) {
+        spellable = false
+      }
+      if spellable {
+        PyCallable(mapped, mapped_ret)
+      } else {
+        self.note(HigherOrderFunction)
+        PyAny
+      }
     }
     @mbti.TypeExpr::Optional(inner) => {
       let t = self.map_at(inner, depth + 1)

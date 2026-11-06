@@ -96,13 +96,28 @@ test "result keeps the value and notes the loss" {
 }
 
 ///|
-test "function values degrade" {
+test "a scalar function value is a callable" {
   let m = @map.Mapper::new("demo")
   let f = @mbti.TypeExpr::Func(
     [{ kind: @mbti.Positional, name: None, ty: int_ty(), }],
     named("Bool"),
     @mbti.Effect::pure(),
   )
+  // The guest carries a callback over scalars, so the signature survives.
+  assert_eq(m.map(f).render(), "Callable[[int], bool]")
+  assert_eq(m.count_reason("higher-order"), 0)
+}
+
+///|
+test "a function value over something unbridgeable degrades" {
+  let m = @map.Mapper::new("demo")
+  let f = @mbti.TypeExpr::Func(
+    [{ kind: @mbti.Positional, name: None, ty: generic("Node", []), }],
+    named("Bool"),
+    @mbti.Effect::pure(),
+  )
+  // A callback that takes a handle has no wire shape: the channel carries
+  // scalars, so the type is `Any` and the loss is counted.
   assert_eq(m.map(f).render(), "Any")
   assert_eq(m.count_reason("higher-order"), 1)
 }
