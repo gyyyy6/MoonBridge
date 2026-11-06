@@ -88,7 +88,7 @@ pub fn generate_with(
   pkg : @mbti.Package,
   opts : GenOptions,
 ) -> Stub {
-  render(world, pkg, opts, Stub)
+  render(world, pkg, None, opts, Stub)
 }
 
 ///|
@@ -101,15 +101,17 @@ pub fn generate_with(
 pub fn bind_with(
   world : @map.World?,
   pkg : @mbti.Package,
+  plan : Plan?,
   opts : GenOptions,
 ) -> Stub {
-  render(world, pkg, opts, Bind)
+  render(world, pkg, plan, opts, Bind)
 }
 
 ///|
 fn render(
   world : @map.World?,
   pkg : @mbti.Package,
+  plan : Plan?,
   opts : GenOptions,
   output : Output,
 ) -> Stub {
@@ -122,6 +124,7 @@ fn render(
     output,
     pkg_name: pkg.name,
     world,
+    plan,
     mapper,
     blocks: [],
     methods: Map([]),
@@ -187,6 +190,9 @@ priv struct Emitter {
   output : Output
   pkg_name : String
   world : @map.World?
+  /// What the guest can answer. `None` in stub mode: a stub declares the whole
+  /// interface whether or not anything is compiled behind it.
+  plan : Plan?
   mapper : @map.Mapper
   /// Finished top-level blocks, in source order.
   blocks : Array[String]
@@ -684,11 +690,15 @@ fn Emitter::render_func(
         Some(r) => r
         None => owner_name
       }
-      let rendered = self.finish(
-        sig,
-        decl_pkg + "::" + raw + "::" + f.name,
-        "        ",
-      )
+      let symbol = decl_pkg + "::" + raw + "::" + f.name
+      // A module only carries what the guest can answer. A declaration the
+      // planner left out has no branch behind it, so a body here would fail at
+      // the call site instead of at generation time.
+      if self.output == Bind && !self.has_symbol(symbol) {
+        self.skipped = self.skipped + 1
+        return None
+      }
+      let rendered = self.finish(sig, symbol, "        ")
       if has_receiver {
         Some("    " + rendered)
       } else {
@@ -702,9 +712,14 @@ fn Emitter::render_func(
         Some(n) => n
         None => @map.stub_name(f.name)
       }
+      let symbol = self.pkg_name + "::" + f.name
+      if self.output == Bind && !self.has_symbol(symbol) {
+        self.skipped = self.skipped + 1
+        return None
+      }
       if self.claim(name) {
         let sig = self.signature(name, false, scoped, f.generics, f.params, ret)
-        Some(self.finish(sig, self.pkg_name + "::" + f.name, "    "))
+        Some(self.finish(sig, symbol, "    "))
       } else {
         None
       }
@@ -742,21 +757,65 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
     }
   }
   let members : Array[String] = []
+  // The table tag travels with the class: a release batch names it, because an
+  // id is only unique within one table and the guest holds one per type.
+  match self.tag_member(s.name) {
+    Some(line) => members.push(line)
+    None => ()
+  }
   // A struct with hidden fields cannot be constructed from Python: the stub
   // still exposes the public fields, but offers no `__init__` that would
   // promise construction is possible.
-  if s.access == @mbti.Open && !s.has_hidden_fields && self.output == Stub {
+  if s.access == @mbti.Open && !s.has_hidden_fields {
+    let ctor = ctor_symbol(self.pkg_name, s.name)
     let ctor_params : Array[String] = ["self"]
     let mut i = 0
     while i < visible.length() {
       let ty = scoped.map(visible[i].ty)
       self.note_type(ty)
-      ctor_params.push(field_names[i] + ": " + ty.render())
+      // A positional field has no MoonBit name, so no literal can be written
+      // for it and the constructor has no symbol. The annotation is still
+      // recorded, so the stub keeps the full picture.
+      let label = if visible[i].name == "" {
+        "field" + i.to_string()
+      } else {
+        @map.stub_name(visible[i].name)
+      }
+      ctor_params.push(label + ": " + ty.render())
       i = i + 1
     }
-    members.push(
-      "    def __init__(" + join(ctor_params, ", ") + ") -> None: ...",
-    )
+    match self.output {
+      Stub =>
+        members.push(
+          "    def __init__(" + join(ctor_params, ", ") + ") -> None: ...",
+        )
+      Bind =>
+        if self.has_symbol(ctor) {
+          // Construction goes through the guest: the object it makes is the
+          // object this wrapper stands for, so the handle it returns is taken
+          // over rather than copied.
+          //
+          // A constructor symbol only exists when every field is named, so the
+          // Python parameter names are the field names in order.
+          let call = "_runtime.default().request(\"" +
+            ctor +
+            "\", [" +
+            join(field_names, ", ") +
+            "])"
+          self.typing_used.set("cast", true)
+          members.push(
+            "    def __init__(" +
+            join(ctor_params, ", ") +
+            ") -> None:\n" +
+            "        super().__init__(" +
+            "cast(int, " +
+            call +
+            "), _runtime.default())",
+          )
+        } else {
+          self.skipped = self.skipped + 1
+        }
+    }
   }
   let mut i = 0
   while i < visible.length() {
@@ -764,24 +823,73 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
     let ty = scoped.map(f.ty)
     self.note_type(ty)
     self.field_count = self.field_count + 1
-    // Field access needs a getter the guest exports; until the MoonBit half of
-    // that exists, the module stays silent rather than raising at the call
-    // site. The annotations above are still recorded, so the stub keeps the
-    // full picture.
-    if self.output == Stub {
-      members.push("    @property")
-      members.push(
-        "    def " + field_names[i] + "(self) -> " + ty.render() + ": ...",
-      )
-      if f.is_mut {
-        members.push("    @" + field_names[i] + ".setter")
+    let member_name = if f.name == "" {
+      "field" + i.to_string()
+    } else {
+      f.name
+    }
+    match self.output {
+      Stub => {
+        members.push("    @property")
         members.push(
-          "    def " +
-          field_names[i] +
-          "(self, value: " +
-          ty.render() +
-          ") -> None: ...",
+          "    def " + field_names[i] + "(self) -> " + ty.render() + ": ...",
         )
+        if f.is_mut {
+          members.push("    @" + field_names[i] + ".setter")
+          members.push(
+            "    def " +
+            field_names[i] +
+            "(self, value: " +
+            ty.render() +
+            ") -> None: ...",
+          )
+        }
+      }
+      Bind => {
+        // A read is a symbol like any other; without one the module would fail
+        // at the call site, so the member is left out instead.
+        let getter = getter_symbol(self.pkg_name, s.name, member_name)
+        let setter = setter_symbol(self.pkg_name, s.name, member_name)
+        if self.has_symbol(getter) {
+          members.push("    @property")
+          members.push(
+            "    " +
+            self.finish(
+              {
+                text: "def " + field_names[i] + "(self) -> " + ty.render(),
+                names: ["self"],
+                ret: ty,
+              },
+              getter,
+              "        ",
+            ),
+          )
+        } else {
+          self.skipped = self.skipped + 1
+        }
+        if f.is_mut {
+          if self.has_symbol(setter) {
+            members.push("    @" + field_names[i] + ".setter")
+            members.push(
+              "    " +
+              self.finish(
+                {
+                  text: "def " +
+                  field_names[i] +
+                  "(self, value: " +
+                  ty.render() +
+                  ") -> None",
+                  names: ["self", "value"],
+                  ret: @map.PyNone,
+                },
+                setter,
+                "        ",
+              ),
+            )
+          } else {
+            self.skipped = self.skipped + 1
+          }
+        }
       }
     }
     i = i + 1
@@ -793,6 +901,46 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
   self.attach_methods(name, s.name, members, taken)
   let header = self.class_header(name, s.generics, [], false, true)
   Some(header + "\n" + body_of("MoonBit struct `" + s.name + "`.", members))
+}
+
+///|
+fn Emitter::has_symbol(self : Emitter, symbol : String) -> Bool {
+  match self.plan {
+    Some(p) => p.has(symbol)
+    None => false
+  }
+}
+
+///|
+/// The handle-table tag for a type declared by this package, or 0 when the
+/// guest never holds one.
+fn Emitter::tag_of_type(self : Emitter, raw : String) -> Int32 {
+  match self.plan {
+    Some(p) => p.tag_of(@map.pkg_alias(self.pkg_name) + "." + raw)
+    None => 0
+  }
+}
+
+///|
+/// The `moon_type_id` class attribute for a type this package declares, or
+/// `None` when the guest holds no table for it.
+///
+/// Every class that can stand for a handle needs this — struct, enum, error and
+/// opaque alike. A class that carries a handle but no tag can never be
+/// released: `close()` would queue an id the guest cannot route to a table, and
+/// the object would stay alive for the life of the process. Enums are the easy
+/// one to forget, because they look like plain values, but `Json` is an enum
+/// and `parse` returns a handle to one.
+fn Emitter::tag_member(self : Emitter, raw : String) -> String? {
+  if self.output == Stub {
+    return None
+  }
+  let tag = self.tag_of_type(raw)
+  if tag > 0 {
+    Some("    moon_type_id = " + tag.to_string())
+  } else {
+    None
+  }
 }
 
 ///|
@@ -896,6 +1044,10 @@ fn Emitter::render_enum(
   let is_error = kind == "suberror"
   let scoped = self.mapper.for_decl(generics, Some(name))
   let members : Array[String] = []
+  match self.tag_member(raw_name) {
+    Some(line) => members.push(line)
+    None => ()
+  }
   if self.output == Stub && ctors.length() == 1 && ctors[0].fields.length() > 0 {
     let ctor_params : Array[String] = ["self"]
     let mut index = 0
@@ -994,6 +1146,10 @@ fn Emitter::render_opaque(self : Emitter, o : @mbti.OpaqueDecl) -> String? {
   self.type_count = self.type_count + 1
   let members : Array[String] = []
   let taken : Map[String, Bool] = Map([])
+  match self.tag_member(o.name) {
+    Some(line) => members.push(line)
+    None => ()
+  }
   self.attach_methods(name, o.name, members, taken)
   let header = self.class_header(name, o.generics, [], false, true)
   Some(

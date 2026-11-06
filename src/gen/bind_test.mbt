@@ -41,9 +41,14 @@ fn core_pkg() -> @mbti.Package {
 }
 
 ///|
+/// A module is generated against a plan: without one there are no symbols, so
+/// nothing to call. Building the plan from the package itself is the smallest
+/// honest fixture.
 fn bind_of(src : String) -> @gen.Stub raise {
   let pkg = @mbti.parse(src)
-  @gen.bind_with(None, pkg, @gen.GenOptions::standard())
+  let world = @map.World::build([pkg])
+  let plan = @gen.Plan::build(world, [pkg], [pkg.name])
+  @gen.bind_with(Some(world), pkg, Some(plan), @gen.GenOptions::standard())
 }
 
 ///|
@@ -131,7 +136,7 @@ test "an associated function is static and returns a wrapped handle" {
 }
 
 ///|
-test "fields and constructors are declared but not bound" {
+test "a struct is constructed and read through the guest" {
   let stub = bind_of(
     "package \"acme/core\"\n" +
     "\n" +
@@ -140,36 +145,61 @@ test "fields and constructors are declared but not bound" {
     "pub(all) enum Shape {\n  Circle(Double)\n  Named(Point)\n}\n",
   )
   assert_true(has_bind(stub.text, "class Point(_runtime.MoonObject):"))
-  // No guest symbol reads a field or runs a constructor yet, and a body that
-  // raised would only move the failure from generation time to call time.
-  assert_false(has_bind(stub.text, "def __init__"))
-  assert_false(has_bind(stub.text, "@property"))
+  // S4: the constructor makes the object in the guest and the wrapper takes
+  // over the handle, so what Python holds *is* the MoonBit value rather than a
+  // copy that could drift from it.
+  assert_true(
+    has_bind(
+      stub.text,
+      "def __init__(self, x: int, y: float) -> None:\n" +
+      "        super().__init__(cast(int, _runtime.default().request(\"acme/core::Point::__new__\", [x, y])), _runtime.default())",
+    ),
+  )
+  // Reads and writes go through generated getter and setter symbols; a field
+  // that is not `mut` gets no setter, because the guest has nothing to call.
+  assert_true(
+    has_bind(
+      stub.text,
+      "    @property\n" +
+      "    def x(self) -> int:\n" +
+      "        return cast(int, _runtime.default().request(\"acme/core::Point::__get_x\", [self]))",
+    ),
+  )
+  assert_true(
+    has_bind(stub.text, "    @y.setter\n    def y(self, value: float) -> None:"),
+  )
+  assert_false(has_bind(stub.text, "@x.setter"))
+  // An enum is not constructible from Python: its payload shapes have no single
+  // signature, and the guest has no symbol that would pick one.
+  assert_false(
+    has_bind(
+      stub.text,
+      "class Shape(_runtime.MoonObject):\n    \"\"\"MoonBit enum `Shape`.\n    def __init__",
+    ),
+  )
   assert_false(has_bind(stub.text, "def tag"))
 }
 
 ///|
 test "a cross-package handle is wrapped in the class its own module defines" {
-  let world = @map.World::build([
-    @mbti.parse_result(
-      "package \"acme/base\"\n\npub(all) struct Gadget {\n  size : Int\n}\n",
-    ).unwrap(),
-    @mbti.parse_result(
-      "package \"acme/ext\"\n" +
-      "\n" +
-      "import {\n  \"acme/base\",\n}\n" +
-      "\n" +
-      "pub fn make(n : Int) -> @base.Gadget\n",
-    ).unwrap(),
-  ])
+  let ext = @mbti.parse_result(
+    "package \"acme/ext\"\n" +
+    "\n" +
+    "import {\n  \"acme/base\",\n}\n" +
+    "\n" +
+    "pub fn make(n : Int) -> @base.Gadget\n",
+  ).unwrap()
+  let base = @mbti.parse_result(
+    "package \"acme/base\"\n\npub(all) struct Gadget {\n  size : Int\n}\n",
+  ).unwrap()
+  let world = @map.World::build([base, ext])
+  // Both packages are compiled into the guest, so `Gadget` crosses by handle
+  // and the ext module can wrap it in the base module's class.
+  let plan = @gen.Plan::build(world, [base, ext], ["acme/base", "acme/ext"])
   let stub = @gen.bind_with(
     Some(world),
-    @mbti.parse_result(
-      "package \"acme/ext\"\n" +
-      "\n" +
-      "import {\n  \"acme/base\",\n}\n" +
-      "\n" +
-      "pub fn make(n : Int) -> @base.Gadget\n",
-    ).unwrap(),
+    ext,
+    Some(plan),
     @gen.GenOptions::standard(),
   )
   // The sibling is imported at the top for the type checker and again inside
@@ -204,9 +234,79 @@ test "a trait protocol keeps an ellipsis body in both outputs" {
 }
 
 ///|
+/// A package where one type crosses as a handle and another cannot, so the tag
+/// emitter can be checked in both directions.
+fn tagged_pkg_and_plan() -> (@mbti.Package, @map.World, @gen.Plan) {
+  let pkg = @mbti.parse_result(
+    "package \"acme/core\"\n" +
+    "\n" +
+    "pub(all) enum Shape {\n" +
+    "  Circle(Double)\n" +
+    "  Named(Point)\n" +
+    "}\n" +
+    "\n" +
+    "pub(all) struct Point {\n" +
+    "  x : Int\n" +
+    "}\n" +
+    "\n" +
+    "pub struct Sealed {\n" +
+    "  value : Int\n" +
+    "}\n" +
+    "\n" +
+    "pub fn draw(s : Shape) -> Shape\n",
+  ).unwrap()
+  let world = @map.World::build([pkg])
+  let plan = @gen.Plan::build(world, [pkg], ["acme/core"])
+  (pkg, world, plan)
+}
+
+///|
+fn bind_of_tagged() -> (@gen.Stub, @gen.Plan) {
+  let (pkg, world, plan) = tagged_pkg_and_plan()
+  (
+    @gen.bind_with(Some(world), pkg, Some(plan), @gen.GenOptions::standard()),
+    plan,
+  )
+}
+
+///|
+test "a class that stands for a handle carries its table tag" {
+  // `Json` is an enum and `parse` hands back a handle to one, so a class that
+  // reads like a value still needs a tag: without one `close()` queues an id
+  // the guest cannot route to a table, and the object outlives its wrapper for
+  // the life of the process. This is the leak the S4 smoke test found.
+  let (stub, plan) = bind_of_tagged()
+  let tag = plan.tag_of("@core.Shape")
+  assert_true(tag > 0)
+  assert_true(has_bind(stub.text, "    moon_type_id = " + tag.to_string()))
+}
+
+///|
+test "a class the guest never holds keeps no tag" {
+  // `Sealed` is a `pub struct`: its fields are hidden, so no constructor, no
+  // getter and no table. Emitting a tag would promise a routing the guest does
+  // not have, and `close()` would then lose the id silently.
+  let (stub, plan) = bind_of_tagged()
+  assert_eq(plan.tag_of("@core.Sealed"), 0)
+  assert_true(has_bind(stub.text, "class Sealed(_runtime.MoonObject):"))
+  // Exactly one tag in the module, and it is the enum's: `Shape` and `Point`
+  // are the only tables the plan asked for, and `Point` is declared here while
+  // its tag is emitted where the class is.
+  assert_eq(stub.text.split("moon_type_id").count(), 3)
+}
+
+///|
 test "the module and the stub agree on every callable name" {
-  let stub = @gen.generate(core_pkg(), @gen.GenOptions::standard())
-  let bind = @gen.bind_with(None, core_pkg(), @gen.GenOptions::standard())
+  let pkg = core_pkg()
+  let world = @map.World::build([pkg])
+  let plan = @gen.Plan::build(world, [pkg], [pkg.name])
+  let stub = @gen.generate(pkg, @gen.GenOptions::standard())
+  let bind = @gen.bind_with(
+    Some(world),
+    pkg,
+    Some(plan),
+    @gen.GenOptions::standard(),
+  )
   // Same walk, same names: whatever the stub promises, the module can answer.
   for
     name in ["def label(", "def norm(", "def area(", "def report(", "def new("] {
