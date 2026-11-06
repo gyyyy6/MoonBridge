@@ -6,6 +6,7 @@ import {
   "moonbitlang/core/json",
   "moonbitlang/core/lexbuf",
   "moonbitlang/core/builtin",
+  "gyyyy6/moonbridge/callbacks",
 }
 
 pkgtype(kind: "foreign_library")

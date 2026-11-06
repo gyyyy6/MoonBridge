@@ -19,18 +19,55 @@
 //! 4. **The dispatch**, one arm per symbol, in the order the plan lists them.
 
 ///|
-/// The MoonBit type of a wire shape, with `?` stripped: the type a value is
-/// unwrapped to before it is passed to the guest function.
-fn base_decl(w : Wire) -> String {
+/// The MoonBit type of a decoded value, including the `?` of an optional one.
+///
+/// This is the type a decoder yields *before* the failure `?` is added, which
+/// is why `Option` nests here and not in the helper's name: `Array[Int?]` has
+/// elements of type `Int?`, and each element is decoded by the `Int` helper
+/// that already returns `Int?`.
+fn val_ty(w : Wire) -> String {
   match w {
     WInt => "Int"
     WDouble => "Double"
     WBool => "Bool"
-    WStr => "String"
-    WStrView => "StringView"
+    WStr | WStrView => "String"
     WUnit => "Unit"
     WHandle(t) => t.expr
-    WMaybe(inner) => base_decl(inner)
+    WMaybe(inner) => val_ty(inner) + "?"
+    WArr(inner) | WArrView(inner) => "Array[" + val_ty(inner) + "]"
+    WMap(k, v) => "Map[" + val_ty(k) + ", " + val_ty(v) + "]"
+    WRes(ok, _) => val_ty(ok)
+    WCall(params, ret) => {
+      let parts : Array[String] = []
+      for p in params {
+        parts.push(val_ty(p))
+      }
+      "(" + join_strings(parts, ", ") + ") -> " + val_ty(ret)
+    }
+  }
+}
+
+///|
+/// The name of the decoder for a shape. An optional one reuses the inner
+/// decoder, because that decoder already answers with `T?` — `null` and "the
+/// caller left it out" are the same thing on the wire.
+fn dec_name(w : Wire) -> String {
+  match w {
+    WMaybe(inner) => dec_name(inner)
+    // A `StringView` arrives as a `String`: the host has no way to hand over a
+    // borrowed view, so both shapes read through one decoder.
+    WStrView => "dec_str"
+    _ => "dec_" + w.key()
+  }
+}
+
+///|
+/// The name of the encoder for a shape, with the same `Option` collapse: an
+/// encoder already takes a `T?`.
+fn enc_name(w : Wire) -> String {
+  match w {
+    WMaybe(inner) => enc_name(inner)
+    _ => "enc_" + w.key()
   }
 }
 
@@ -43,19 +80,15 @@ fn base_wire(w : Wire) -> Wire {
 }
 
 ///|
-/// The decoder for one argument shape, or `None` for `Unit`, which needs none.
-fn arg_helper(w : Wire) -> String? {
-  match w {
+/// How one argument is decoded, given the frame and its position.
+///
+/// `None` for `Unit`, which carries nothing: the callee's parameter is `()`,
+/// and asking the frame for a value that was never sent would be a protocol
+/// error invented by the generator.
+fn arg_expr(w : Wire, index : String) -> String? {
+  match base_wire(w) {
     WUnit => None
-    WMaybe(inner) => arg_helper(inner)
-    WInt => Some("arg_int")
-    WDouble => Some("arg_double")
-    WBool => Some("arg_bool")
-    WStr => Some("arg_str")
-    // A view is built at the call site, from a string this helper returns: a
-    // view made inside the helper would borrow a value that dies with it.
-    WStrView => Some("arg_str")
-    WHandle(t) => Some("arg_" + t.key)
+    _ => Some(dec_name(w) + "(arg(argv, " + index + "))")
   }
 }
 
@@ -63,16 +96,7 @@ fn arg_helper(w : Wire) -> String? {
 /// The encoder for one return shape. Every encoder takes a `T?`, so a plain `T`
 /// and a `T?` are converted by the same call.
 fn out_helper(w : Wire) -> String {
-  match w {
-    WMaybe(inner) => out_helper(inner)
-    WInt => "out_int"
-    WDouble => "out_double"
-    WBool => "out_bool"
-    WStr => "out_str"
-    WStrView => "out_strview"
-    WUnit => "out_unit"
-    WHandle(t) => "out_" + t.key
-  }
+  enc_name(w)
 }
 
 ///|
@@ -81,6 +105,9 @@ fn out_helper(w : Wire) -> String {
 fn call_arg(w : Wire, v : String) -> String {
   match base_wire(w) {
     WStrView => v + "[:]"
+    // MoonBit will not coerce an `Array` into an `ArrayView` at a call, and the
+    // declaration is the only place that says which one is wanted.
+    WArrView(_) => v + "[:]"
     WUnit => "()"
     _ => v
   }
@@ -102,6 +129,40 @@ fn some_var(i : Int32) -> String {
 fn[T : Eq] push_unique(list : Array[T], value : T) -> Unit {
   if !list.contains(value) {
     list.push(value)
+  }
+}
+
+///|
+/// Every shape one value is made of, outermost first.
+///
+/// A `StringView` is recorded as a `String` because the decoder is shared, and
+/// a duplicate definition does not compile.
+fn collect_shapes(w : Wire, out : Array[Wire]) -> Unit {
+  let normalized = match w {
+    // A view is decoded and encoded by the array helpers, so it must not add a
+    // second copy of them.
+    WArrView(inner) => WArr(inner)
+    other => other
+  }
+  push_unique(out, normalized)
+  match w {
+    WMaybe(inner) => collect_shapes(inner, out)
+    WArr(inner) => collect_shapes(inner, out)
+    WMap(k, v) => {
+      collect_shapes(k, out)
+      collect_shapes(v, out)
+    }
+    WRes(ok, err) => {
+      collect_shapes(ok, out)
+      collect_shapes(err, out)
+    }
+    WCall(params, ret) => {
+      for p in params {
+        collect_shapes(p, out)
+      }
+      collect_shapes(ret, out)
+    }
+    _ => ()
   }
 }
 
@@ -270,33 +331,25 @@ fn render_arm(sym : Sym) -> String {
     Setter => render_setter_arm(sym, sb)
     _ => {
       // Arguments. A required one is unwrapped here, because a missing
-      // argument is a protocol failure with a symbol name in it.
+      // argument is a protocol failure with a symbol name in it. An optional
+      // one is passed through: `null` *is* the absent argument, so there is
+      // nothing to fail on.
       let mut i = 0
       while i < sym.params.length() {
         let w = sym.params[i]
-        match arg_helper(w) {
+        match arg_expr(w, i.to_string()) {
           None => ()
-          Some(helper) =>
+          Some(expr) =>
             match w {
               WMaybe(_) =>
-                sb.write_string(
-                  "      let " +
-                  arg_var(i) +
-                  " = " +
-                  helper +
-                  "(argv, " +
-                  i.to_string() +
-                  ")\n",
-                )
+                sb.write_string("      let " + arg_var(i) + " = " + expr + "\n")
               _ =>
                 sb.write_string(
                   "      let " +
                   arg_var(i) +
                   " = match " +
-                  helper +
-                  "(argv, " +
-                  i.to_string() +
-                  ") {\n" +
+                  expr +
+                  " {\n" +
                   "        Some(v) => v\n" +
                   "        None => return @abi.Failed(\"" +
                   sym.symbol +
@@ -311,47 +364,85 @@ fn render_arm(sym : Sym) -> String {
       }
       let call = render_call(sym)
       if sym.raises {
-        // A raised MoonBit error becomes a failure frame: the Python side turns
-        // it into `MoonError`, which is the only error the ABI has.
+        // A raised MoonBit error becomes a failure frame that names its type,
+        // so the Python side can raise the generated exception class rather
+        // than a catch-all.
+        let failure = if sym.error_type == "" {
+          "@abi.Failed(error.to_string())"
+        } else {
+          "@abi.FailedAs(\"" + sym.error_type + "\", error.to_string())"
+        }
         sb.write_string(
           "      let value = try {\n        " +
           call +
-          "\n      } catch {\n        error => return @abi.Failed(error.to_string())\n      }\n",
+          "\n      } catch {\n        error => return " +
+          failure +
+          "\n      }\n",
         )
       } else {
         sb.write_string("      let value = " + call + "\n")
       }
-      // Encoding can fail: a table that has run out of slots raises, and a
-      // failure frame is a far better outcome than a panic the host cannot
-      // attribute.
-      // Every encoder takes a `T?`. A return that is already optional is
-      // passed through; a plain one is wrapped, because MoonBit does not
-      // coerce `T` into `T?` at a call.
-      let argument = match sym.ret {
-        WMaybe(_) => "value"
-        _ => "Some(value)"
-      }
-      let encoded = "@abi.Ok(" + out_helper(sym.ret) + "(" + argument + "))"
-      // Encoding a handle inserts into a table, which raises when the table is
-      // full. A `try` around a body that cannot raise is a warning, so it is
-      // only written where it can.
-      let encoder_raises = match base_wire(sym.ret) {
-        WHandle(_) => true
-        _ => false
-      }
-      if encoder_raises {
-        sb.write_string(
-          "      try {\n        " +
-          encoded +
-          "\n      } catch {\n        error => @abi.Failed(error.to_string())\n      }\n",
-        )
-      } else {
-        sb.write_string("      " + encoded + "\n")
+      match sym.ret {
+        WRes(ok, _) =>
+          // `Ok` is the value; `Err` is the exception Python would have raised
+          // had the language had one. The wrapper is erased on purpose.
+          sb.write_string(
+            "      match value {\n" +
+            "        Ok(inner) => @abi.Ok(" +
+            enc_name(ok) +
+            "(Some(inner)))\n" +
+            "        Err(error) => @abi.FailedAs(\"" +
+            sym_error_type(sym) +
+            "\", error.to_string())\n" +
+            "      }\n",
+          )
+        _ => {
+          // Every encoder takes a `T?`. A return that is already optional is
+          // passed through; a plain one is wrapped, because MoonBit does not
+          // coerce `T` into `T?` at a call.
+          let argument = match sym.ret {
+            WMaybe(_) => "value"
+            _ => "Some(value)"
+          }
+          let encoded = "@abi.Ok(" + out_helper(sym.ret) + "(" + argument + "))"
+          // Encoding a handle inserts into a table, which raises when the table
+          // is full. A `try` around a body that cannot raise is a warning, so it
+          // is only written where it can.
+          if encoder_raises(sym.ret) {
+            sb.write_string(
+              "      try {\n        " +
+              encoded +
+              "\n      } catch {\n        error => @abi.Failed(error.to_string())\n      }\n",
+            )
+          } else {
+            sb.write_string("      " + encoded + "\n")
+          }
+        }
       }
     }
   }
   sb.write_string("    }\n")
   sb.to_string()
+}
+
+///|
+/// The error type a `Result` return carries, spelled the way the Python side
+/// registered it.
+fn sym_error_type(sym : Sym) -> String {
+  sym.error_type
+}
+
+///|
+/// Whether encoding this shape can raise. Only a handle does: it inserts into a
+/// table, and a full table raises.
+fn encoder_raises(w : Wire) -> Bool {
+  match w {
+    WHandle(_) => true
+    WArr(inner) | WArrView(inner) => encoder_raises(inner)
+    WMap(k, v) => encoder_raises(k) || encoder_raises(v)
+    WMaybe(inner) => encoder_raises(inner)
+    _ => false
+  }
 }
 
 ///|
@@ -364,10 +455,7 @@ fn render_setter_arm(sym : Sym, sb : StringBuilder) -> Unit {
     _ => ""
   }
   let value_wire = if sym.params.length() > 1 { sym.params[1] } else { WUnit }
-  let value_helper = match arg_helper(value_wire) {
-    Some(h) => h
-    None => "arg_int"
-  }
+  let value_expr = dec_name(value_wire) + "(arg(argv, 1))"
   sb.write_string(
     "      let id = match arg_handle(argv, 0) {\n" +
     "        Some(v) => v\n" +
@@ -376,8 +464,8 @@ fn render_setter_arm(sym : Sym, sb : StringBuilder) -> Unit {
     ": bad argument 1\")\n" +
     "      }\n" +
     "      let value = match " +
-    value_helper +
-    "(argv, 1) {\n" +
+    value_expr +
+    " {\n" +
     "        Some(v) => v\n" +
     "        None => return @abi.Failed(\"" +
     sym.symbol +
@@ -402,79 +490,66 @@ fn render_setter_arm(sym : Sym, sb : StringBuilder) -> Unit {
 }
 
 ///|
-/// The decoder for one argument shape, as source.
-fn emit_arg_helper(sb : StringBuilder, w : Wire) -> Unit {
-  let name = match arg_helper(w) {
-    Some(n) => n
-    None => return
-  }
+/// One decoder per shape, as source.
+///
+/// Three rules make the recursion work. A decoder takes a `@abi.Value?` — the
+/// same thing the frame hands back for a position that may not exist — so a
+/// container can decode its elements with the very function it uses for itself.
+/// An `Option` has no helper of its own, because the inner decoder already
+/// answers with a `T?`. And nothing recurses at emission time: every shape is
+/// collected up front, so a shape shared by two symbols is written once.
+fn emit_dec_helper(sb : StringBuilder, w : Wire) -> Unit {
   match w {
+    // An `Option` is read by the payload's decoder, which already answers with a
+    // `T?`. Delegating keeps this function total even if a caller passes a
+    // wrapper that the emission loop did not unwrap.
+    WMaybe(inner) => emit_dec_helper(sb, inner)
+    WUnit => ()
     WInt =>
       sb.write_string(
-        "///|\nfn " +
-        name +
-        "(args : Array[@abi.Value], i : Int32) -> Int? {\n" +
-        "  match arg(args, i) {\n" +
-        "    Some(v) => v.as_int()\n" +
-        "    None => None\n" +
-        "  }\n" +
-        "}\n\n",
+        "///|\nfn dec_int(v : @abi.Value?) -> Int? {\n" +
+        "  match v {\n    Some(x) => x.as_int()\n    None => None\n  }\n}\n\n",
       )
     WDouble =>
       // A Python `int` is a perfectly good `Double`: the codec tags it as an
       // int, and refusing it here would make `f(1)` fail where `f(1.0)` works.
       sb.write_string(
-        "///|\nfn " +
-        name +
-        "(args : Array[@abi.Value], i : Int32) -> Double? {\n" +
-        "  match arg(args, i) {\n" +
-        "    Some(v) =>\n" +
-        "      match v.as_double() {\n" +
+        "///|\nfn dec_double(v : @abi.Value?) -> Double? {\n" +
+        "  match v {\n" +
+        "    Some(x) =>\n" +
+        "      match x.as_double() {\n" +
         "        Some(d) => Some(d)\n" +
         "        None =>\n" +
-        "          match v.as_int() {\n" +
+        "          match x.as_int() {\n" +
         "            Some(n) => Some(n.to_double())\n" +
         "            None => None\n" +
         "          }\n" +
         "      }\n" +
         "    None => None\n" +
-        "  }\n" +
-        "}\n\n",
+        "  }\n}\n\n",
       )
     WBool =>
       sb.write_string(
-        "///|\nfn " +
-        name +
-        "(args : Array[@abi.Value], i : Int32) -> Bool? {\n" +
-        "  match arg(args, i) {\n" +
-        "    Some(v) => v.as_bool()\n" +
-        "    None => None\n" +
-        "  }\n" +
-        "}\n\n",
+        "///|\nfn dec_bool(v : @abi.Value?) -> Bool? {\n" +
+        "  match v {\n    Some(x) => x.as_bool()\n    None => None\n  }\n}\n\n",
       )
     WStr | WStrView =>
       sb.write_string(
-        "///|\nfn " +
-        name +
-        "(args : Array[@abi.Value], i : Int32) -> String? {\n" +
-        "  match arg(args, i) {\n" +
-        "    Some(v) => v.as_string()\n" +
-        "    None => None\n" +
-        "  }\n" +
-        "}\n\n",
+        "///|\nfn dec_str(v : @abi.Value?) -> String? {\n" +
+        "  match v {\n    Some(x) => x.as_string()\n    None => None\n  }\n}\n\n",
       )
     WHandle(t) =>
       sb.write_string(
         "///|\n/// A handle from the host, resolved against the table for `" +
         t.expr +
-        "`.\nfn " +
-        name +
-        "(args : Array[@abi.Value], i : Int32) -> " +
+        "`.\nfn dec_" +
+        t.key +
+        "(v : @abi.Value?) -> " +
         t.expr +
         "? {\n" +
-        "  match arg(args, i) {\n" +
-        "    Some(v) =>\n" +
-        "      match v.as_handle() {\n" +
+        "  match v {\n" +
+        "    Some(x) =>\n" +
+        "      match x.as_handle() {\n" +
         "        Some(id) =>\n" +
         "          match tables." +
         t.key +
@@ -485,75 +560,305 @@ fn emit_arg_helper(sb : StringBuilder, w : Wire) -> Unit {
         "        None => None\n" +
         "      }\n" +
         "    None => None\n" +
-        "  }\n" +
-        "}\n\n",
+        "  }\n}\n\n",
       )
-    WUnit | WMaybe(_) => ()
+    WArr(inner) | WArrView(inner) => {
+      let ty = val_ty(inner)
+      sb.write_string(
+        "///|\nfn dec_" +
+        w.key() +
+        "(v : @abi.Value?) -> Array[" +
+        ty +
+        "]? {\n" +
+        "  match v {\n" +
+        "    Some(@abi.List(items)) => {\n" +
+        "      let out : Array[" +
+        ty +
+        "] = []\n" +
+        "      let mut ok = true\n" +
+        "      for item in items {\n" +
+        "        match " +
+        dec_name(inner) +
+        "(Some(item)) {\n" +
+        "          Some(x) => out.push(x)\n" +
+        "          None => ok = false\n" +
+        "        }\n" +
+        "      }\n" +
+        "      if ok {\n" +
+        "        Some(out)\n" +
+        "      } else {\n" +
+        "        None\n" +
+        "      }\n" +
+        "    }\n" +
+        "    _ => None\n" +
+        "  }\n}\n\n",
+      )
+    }
+    WMap(k, v) =>
+      sb.write_string(
+        "///|\nfn dec_" +
+        w.key() +
+        "(v : @abi.Value?) -> Map[" +
+        val_ty(k) +
+        ", " +
+        val_ty(v) +
+        "]? {\n" +
+        "  match v {\n" +
+        "    Some(@abi.Map(pairs)) => {\n" +
+        "      let out : Map[" +
+        val_ty(k) +
+        ", " +
+        val_ty(v) +
+        "] = Map([])\n" +
+        "      let mut ok = true\n" +
+        "      for pair in pairs {\n" +
+        "        let (raw_key, raw_value) = pair\n" +
+        "        match (" +
+        dec_name(k) +
+        "(Some(raw_key)), " +
+        dec_name(v) +
+        "(Some(raw_value))) {\n" +
+        "          (Some(kk), Some(vv)) => out.set(kk, vv)\n" +
+        "          _ => ok = false\n" +
+        "        }\n" +
+        "      }\n" +
+        "      if ok {\n" +
+        "        Some(out)\n" +
+        "      } else {\n" +
+        "        None\n" +
+        "      }\n" +
+        "    }\n" +
+        "    _ => None\n" +
+        "  }\n}\n\n",
+      )
+    // A `Result` is unwrapped by the arm that returns it.
+    WRes(_, _) => ()
+    // A callback arrives as an integer id; the guest wraps it in a closure
+    // that calls back through the host import.
+    WCall(_, _) => sb.write_string(callback_decoder(w))
   }
 }
 
 ///|
-/// The encoder for one return shape, as source.
-fn emit_out_helper(sb : StringBuilder, w : Wire) -> Unit {
-  let name = out_helper(w)
-  let decl = "fn " + name + "(v : " + base_decl(w) + "?) -> @abi.Value {\n"
-  let head = "///|\n" + decl + "  match v {\n"
-  let tail = "  }\n}\n\n"
+/// The closure a callback parameter becomes.
+///
+/// The id travels through a table the *host* owns, so the guest never holds a
+/// Python object: it holds a number and a function that turns the number into a
+/// call. Nothing about the Python callable is visible from here.
+fn callback_decoder(w : Wire) -> String {
+  let params = match w {
+    WCall(params, _) => params
+    _ => []
+  }
+  let ret = match w {
+    WCall(_, ret) => ret
+    _ => WUnit
+  }
+  let types : Array[String] = []
+  let encoded : Array[String] = []
+  let applied : Array[String] = []
+  let mut i = 0
+  for p in params {
+    let name = "a" + i.to_string()
+    // A function *type* names no parameters; only the closure that
+    // implements it does.
+    types.push(val_ty(p))
+    encoded.push(enc_name(p) + "(Some(" + name + "))")
+    applied.push(name)
+    i = i + 1
+  }
+  let call_args = if applied.length() == 0 {
+    "[]"
+  } else {
+    "[" + join_strings(encoded, ", ") + "]"
+  }
+  let body = if ret == WUnit {
+    "    invoke_callback(id, " + call_args + ")\n    ()"
+  } else if is_maybe(ret) {
+    // The decoder already answers with a `T?`, which is exactly what an
+    // optional callback returns — unwrapping it would lose the `None`.
+    "    match invoke_callback(id, " +
+    call_args +
+    ") {\n" +
+    "      Some(v) => " +
+    dec_name(ret) +
+    "(Some(v))\n" +
+    "      None => None\n" +
+    "    }"
+  } else {
+    "    match invoke_callback(id, " +
+    call_args +
+    ") {\n" +
+    "      Some(v) => match " +
+    dec_name(ret) +
+    "(Some(v)) {\n" +
+    "        Some(r) => r\n" +
+    "        None => " +
+    zero_value(ret) +
+    "\n" +
+    "      }\n" +
+    "      None => " +
+    zero_value(ret) +
+    "\n" +
+    "    }"
+  }
+  "///|\nfn " +
+  dec_name(w) +
+  "(v : @abi.Value?) -> ((" +
+  join_strings(types, ", ") +
+  ") -> " +
+  val_ty(ret) +
+  ")? {\n" +
+  "  match v {\n" +
+  "    Some(raw) => match raw.as_int() {\n" +
+  "    Some(id) =>\n" +
+  "      Some(fn(" +
+  join_strings(applied, ", ") +
+  ") {\n" +
+  body +
+  "\n      })\n" +
+  "      None => None\n" +
+  "    }\n" +
+  "    None => None\n" +
+  "  }\n}\n\n"
+}
+
+///|
+fn is_maybe(w : Wire) -> Bool {
   match w {
+    WMaybe(_) => true
+    _ => false
+  }
+}
+
+///|
+/// What a callback returns when the host call failed.
+///
+/// The value is never seen: a Python exception inside a callback is recorded by
+/// the host and re-raised when the outer call returns, so the outer result is
+/// discarded either way. A default keeps the MoonBit closure total, which is
+/// what its declared type demands.
+fn zero_value(w : Wire) -> String {
+  match w {
+    WInt => "0"
+    WDouble => "0.0"
+    WBool => "false"
+    WStr | WStrView => "\"\""
+    WUnit => "()"
+    _ => "abort(\"callback shape\")"
+  }
+}
+
+///|
+/// One encoder per shape, as source. Every encoder takes a `T?`.
+fn emit_enc_helper(sb : StringBuilder, w : Wire) -> Unit {
+  match w {
+    WMaybe(inner) => emit_enc_helper(sb, inner)
+    WUnit =>
+      sb.write_string(
+        "///|\nfn enc_unit(_v : Unit?) -> @abi.Value {\n  @abi.Value::unit()\n}\n\n",
+      )
     WInt =>
       sb.write_string(
-        head +
-        "    Some(x) => @abi.Int(x)\n    None => @abi.Value::unit()\n" +
-        tail,
+        "///|\nfn enc_int(v : Int?) -> @abi.Value {\n" +
+        "  match v {\n    Some(x) => @abi.Int(x)\n    None => @abi.Value::unit()\n  }\n}\n\n",
       )
     WDouble =>
       sb.write_string(
-        head +
-        "    Some(x) => @abi.Double(x)\n    None => @abi.Value::unit()\n" +
-        tail,
+        "///|\nfn enc_double(v : Double?) -> @abi.Value {\n" +
+        "  match v {\n    Some(x) => @abi.Double(x)\n    None => @abi.Value::unit()\n  }\n}\n\n",
       )
     WBool =>
       sb.write_string(
-        head +
-        "    Some(x) => @abi.Bool(x)\n    None => @abi.Value::unit()\n" +
-        tail,
+        "///|\nfn enc_bool(v : Bool?) -> @abi.Value {\n" +
+        "  match v {\n    Some(x) => @abi.Bool(x)\n    None => @abi.Value::unit()\n  }\n}\n\n",
       )
     WStr =>
       sb.write_string(
-        head +
-        "    Some(x) => @abi.Str(x)\n    None => @abi.Value::unit()\n" +
-        tail,
+        "///|\nfn enc_str(v : String?) -> @abi.Value {\n" +
+        "  match v {\n    Some(x) => @abi.Str(x)\n    None => @abi.Value::unit()\n  }\n}\n\n",
       )
     WStrView =>
       // A view is borrowed from a value the caller owns; the host gets a copy.
       sb.write_string(
-        head +
-        "    Some(x) => @abi.Str(x.to_owned())\n    None => @abi.Value::unit()\n" +
-        tail,
-      )
-    WUnit =>
-      sb.write_string(
-        "///|\nfn " +
-        name +
-        "(_v : Unit?) -> @abi.Value {\n  @abi.Value::unit()\n}\n\n",
+        "///|\nfn enc_strview(v : StringView?) -> @abi.Value {\n" +
+        "  match v {\n    Some(x) => @abi.Str(x.to_owned())\n    None => @abi.Value::unit()\n  }\n}\n\n",
       )
     WHandle(t) =>
       // `insert` raises when the table is full, and a full table is a real
       // outcome rather than a bug: the encoder is honest about it and every
       // caller runs inside a `try`.
       sb.write_string(
-        "///|\nfn " +
-        name +
+        "///|\nfn enc_" +
+        t.key +
         "(v : " +
-        base_decl(w) +
+        t.expr +
         "?) -> @abi.Value raise {\n  match v {\n" +
         "    Some(x) => @abi.Handle(tables." +
         t.key +
         ".insert(@ref.Ref(x)))\n" +
-        "    None => @abi.Value::unit()\n" +
-        "  }\n}\n\n",
+        "    None => @abi.Value::unit()\n  }\n}\n\n",
       )
-    WMaybe(_) => ()
+    WArr(inner) | WArrView(inner) => {
+      let raises = if encoder_raises(inner) { " raise" } else { "" }
+      sb.write_string(
+        "///|\nfn enc_" +
+        w.key() +
+        "(v : Array[" +
+        val_ty(inner) +
+        "]?) -> @abi.Value" +
+        raises +
+        " {\n" +
+        "  match v {\n" +
+        "    Some(items) => {\n" +
+        "      let out : Array[@abi.Value] = []\n" +
+        "      for item in items {\n" +
+        "        out.push(" +
+        enc_name(inner) +
+        "(item))\n" +
+        "      }\n" +
+        "      @abi.List(out)\n" +
+        "    }\n" +
+        "    None => @abi.Value::unit()\n  }\n}\n\n",
+      )
+    }
+    WMap(k, v) => {
+      let raises = if encoder_raises(k) || encoder_raises(v) {
+        " raise"
+      } else {
+        ""
+      }
+      sb.write_string(
+        "///|\nfn enc_" +
+        w.key() +
+        "(v : Map[" +
+        val_ty(k) +
+        ", " +
+        val_ty(v) +
+        "]?) -> @abi.Value" +
+        raises +
+        " {\n" +
+        "  match v {\n" +
+        "    Some(items) => {\n" +
+        "      let out : Array[(@abi.Value, @abi.Value)] = []\n" +
+        "      for entry in items {\n" +
+        "        let (key, item) = entry\n" +
+        "        out.push((" +
+        enc_name(k) +
+        "(Some(key)), " +
+        enc_name(v) +
+        "(Some(item))))\n" +
+        "      }\n" +
+        "      @abi.Map(out)\n" +
+        "    }\n" +
+        "    None => @abi.Value::unit()\n  }\n}\n\n",
+      )
+    }
+    // A `Result` is unwrapped in the dispatch arm, not by an encoder: `Ok` has
+    // a value to encode and `Err` has a type to name.
+    WRes(_, _) => ()
+    // A callback is not a return shape the frame can carry.
+    WCall(_, _) => ()
   }
 }
 
@@ -590,13 +895,25 @@ pub fn render_guest(plan : Plan) -> String {
     "/// is written in place, so the host is handed the same object every call.\n" +
     "let out_slot : Array[FixedArray[Byte]] = [FixedArray::make(4096, b'\\x00')]\n\n",
   )
+  // A callback needs a second buffer: the host writes the call's result into
+  // memory, and it cannot use the input buffer, which still holds the frame
+  // being decoded.
+  let needs_callback_buf = plan_uses_callbacks(plan)
   sb.write_string(
     "///|\n/// The input buffer, owned by the guest so the host never has to know how a\n" +
     "/// MoonBit `Bytes` is laid out beyond one discovered offset.\n" +
     "priv struct Buffers {\n" +
     "  mut inbox : Bytes\n" +
+    (if needs_callback_buf {
+      "  /// Written by the host while a callback runs.\n" +
+      "  mut cb_out : Bytes\n"
+    } else {
+      ""
+    }) +
     "}\n\n" +
-    "///|\nlet buffers : Buffers = { inbox: Bytes::new(1024), }\n\n",
+    "///|\nlet buffers : Buffers = { inbox: Bytes::new(1024), " +
+    (if needs_callback_buf { "cb_out: Bytes::new(256), " } else { "" }) +
+    "}\n\n",
   )
   sb.write_string(
     "///|\n/// A fingerprinted buffer the host probes once to learn where the data of a\n" +
@@ -691,23 +1008,23 @@ pub fn render_guest(plan : Plan) -> String {
     "  }\n" +
     "}\n\n",
   )
+  if needs_callback_buf {
+    sb.write_string(render_callback_support())
+  }
   // Decoders and encoders, only for the shapes this plan uses.
+  //
+  // Collections are structural: `Array[Map[String, Int]]` contributes three
+  // shapes, and the recursion in `emit_*_helper` writes all three. A shape that
+  // appears in two symbols is written once, which is why this dedupes by key
+  // rather than by symbol.
   let args_used : Array[Wire] = []
   let outs_used : Array[Wire] = []
   let mut needs_handle_id = false
   for s in plan.syms {
     for w in s.params {
-      // `WStr` and `WStrView` share one decoder, so they must not both emit it.
-      let base = match base_wire(w) {
-        WStrView => WStr
-        other => other
-      }
-      match arg_helper(base) {
-        Some(_) => push_unique(args_used, base)
-        None => ()
-      }
+      collect_shapes(w, args_used)
     }
-    push_unique(outs_used, base_wire(s.ret))
+    collect_shapes(s.ret, outs_used)
     if s.kind == Setter {
       needs_handle_id = true
     }
@@ -724,11 +1041,28 @@ pub fn render_guest(plan : Plan) -> String {
       "}\n\n",
     )
   }
+  // Two shapes can share one helper — `String` and `StringView` decode through
+  // the same function — so the emitted set is keyed by helper name, not by
+  // shape. Emitting twice would define the same function twice.
+  let dec_written : Array[String] = []
   for w in args_used {
-    emit_arg_helper(sb, w)
+    let name = dec_name(w)
+    if !dec_written.contains(name) {
+      dec_written.push(name)
+      // `Option[T]` decodes and encodes with the `T` helper, so the shape that
+      // has to be written is the payload, not the wrapper. Emitting the wrapper
+      // would claim the name and then write nothing, and the `T` that follows
+      // in `args_used` would be skipped as a duplicate.
+      emit_dec_helper(sb, base_wire(w))
+    }
   }
+  let enc_written : Array[String] = []
   for w in outs_used {
-    emit_out_helper(sb, w)
+    let name = enc_name(w)
+    if !enc_written.contains(name) {
+      enc_written.push(name)
+      emit_enc_helper(sb, base_wire(w))
+    }
   }
   sb.write_string(render_release(plan))
   sb.write_string(render_dispatch(plan))
@@ -885,4 +1219,103 @@ pub fn render_guest_pkg(plan : Plan, abi : String) -> String {
     ")\n",
   )
   sb.to_string()
+}
+
+///|
+/// Whether any symbol in the plan takes or returns a function.
+fn plan_uses_callbacks(plan : Plan) -> Bool {
+  let mut found = false
+  for s in plan.syms {
+    for w in s.params {
+      if has_callback(w) {
+        found = true
+      }
+    }
+    if has_callback(s.ret) {
+      found = true
+    }
+  }
+  found
+}
+
+///|
+fn has_callback(w : Wire) -> Bool {
+  match w {
+    WCall(_, _) => true
+    WMaybe(inner) | WArr(inner) | WArrView(inner) => has_callback(inner)
+    WMap(k, v) => has_callback(k) || has_callback(v)
+    WRes(ok, err) => has_callback(ok) || has_callback(err)
+    _ => false
+  }
+}
+
+///|
+/// The guest half of the callback channel.
+///
+/// A callback is an `Int32` id on the wire. Everything else — which Python
+/// callable the id names, whether it raised — lives on the host side. The guest
+/// only knows how to say "call number 3 with these arguments" and read the
+/// answer back out of memory.
+///
+/// The import is the part that makes this work at all: because `mb_cb_invoke`
+/// is a *wasm import*, the host function runs on the thread that is already
+/// inside the guest, with the guest's stack intact. No coroutine, no replay, no
+/// second thread.
+fn render_callback_support() -> String {
+  "///|\n" +
+  "/// Calls back into the host, which owns the callable. The request is already\n" +
+  "/// in the response buffer; the answer is written to `buffers.cb_out`.\n" +
+  "///\n" +
+  "/// Only the wasm build has a host to call. The generator itself runs on\n" +
+  "/// JavaScript, and it compiles this package too, so the other target gets a\n" +
+  "/// stub: nothing can call a callback without a guest instance.\n" +
+  "#cfg(target=\"wasm\")\n" +
+  "extern \"wasm\" fn mb_cb_invoke(cb_id : Int32, len : Int32) -> Int32 = \"env\" \"mb_cb_invoke\"\n\n" +
+  "#cfg(not(target=\"wasm\"))\n" +
+  "fn mb_cb_invoke(cb_id : Int32, len : Int32) -> Int32 {\n" +
+  "  ignore(cb_id)\n" +
+  "  ignore(len)\n" +
+  "  0\n" +
+  "}\n\n" +
+  "///|\n" +
+  "/// Hands the host a buffer to write a callback's result into, and returns it.\n" +
+  "///\n" +
+  "/// Exported because the host cannot allocate: it can only write into memory\n" +
+  "/// the guest already owns, and it has to ask for that memory in the guest's\n" +
+  "/// own allocator.\n" +
+  "#export_name(\"mb_cb_buffer\")\n" +
+  "pub fn cb_buffer(n : Int32) -> Bytes {\n" +
+  "  if n > buffers.cb_out.length() {\n" +
+  "    let mut size = if buffers.cb_out.length() > 0 { buffers.cb_out.length() } else { 256 }\n" +
+  "    while size < n {\n" +
+  "      size = size * 2\n" +
+  "    }\n" +
+  "    buffers.cb_out = Bytes::new(size)\n" +
+  "  }\n" +
+  "  buffers.cb_out\n" +
+  "}\n\n" +
+  "///|\n" +
+  "/// Runs one Python callable and returns its value.\n" +
+  "///\n" +
+  "/// `None` means the host could not produce a value — it raised, or the answer\n" +
+  "/// did not decode. The caller substitutes a default and lets the host re-raise\n" +
+  "/// the original exception once the outer call returns, so the bad value is\n" +
+  "/// never observed.\n" +
+  "fn invoke_callback(id : Int32, args : Array[@abi.Value]) -> @abi.Value? {\n" +
+  "  let sent = publish(@abi.encode(@abi.Value::List(args)))\n" +
+  "  let got = mb_cb_invoke(id, sent)\n" +
+  "  if got <= 0 {\n" +
+  "    return None\n" +
+  "  }\n" +
+  "  let frame = slice(buffers.cb_out, 0, got)\n" +
+  "  let status = try {\n" +
+  "    Some(@abi.decode_status(frame))\n" +
+  "  } catch {\n" +
+  "    _ => None\n" +
+  "  }\n" +
+  "  match status {\n" +
+  "    Some(@abi.Ok(v)) => Some(v)\n" +
+  "    _ => None\n" +
+  "  }\n" +
+  "}\n\n"
 }
