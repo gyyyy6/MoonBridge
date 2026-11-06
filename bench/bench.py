@@ -40,10 +40,27 @@ DOC = '{"name": "moonbridge", "tags": ["ffi", "codegen"], "count": 3, "ok": true
 TEXT = "hello world"
 CHECKPOINTS = (1_000, 5_000, 10_000, 25_000, 50_000, 100_000)
 
+#: Replaced by `main()` with a set scaled to `--calls`. The plateau assertion
+#: compares the last two samples, so even a short run needs two of them.
+POINTS: tuple[int, ...] = ()
+
 #: The garbage-collected case deliberately lets a few wrappers survive the run
 #: so that the deferred path is exercised across many batches, not just at the
 #: end. They are dropped and re-counted before the final assertion.
 SURVIVORS = 5
+
+
+def checkpoints_for(calls: int) -> tuple[int, ...]:
+    """Scales the fixed sample points down to a short run.
+
+    The last sample is always the end of the run, and a midpoint is added when
+    the fixed points would leave fewer than two samples to compare.
+    """
+    points = [p for p in CHECKPOINTS if p < calls]
+    if calls >= 2 and (not points or points[-1] < calls // 2):
+        points.append(calls // 2)
+    points.append(calls)
+    return tuple(dict.fromkeys(p for p in points if 0 < p <= calls))
 
 
 class Sample(NamedTuple):
@@ -76,7 +93,7 @@ def measure(name: str, calls: int, body: Callable[[int], None]) -> Result:
         t0 = time.perf_counter()
         body(i)
         stamps.append(time.perf_counter() - t0)
-        if next_check < len(CHECKPOINTS) and i + 1 == CHECKPOINTS[next_check]:
+        if next_check < len(POINTS) and i + 1 == POINTS[next_check]:
             next_check += 1
             curve.append(
                 Sample(i + 1, hook.live_handles(), hook.memory_bytes())
@@ -114,7 +131,7 @@ def report(results: list[Result]) -> None:
     for r in results:
         row = "  ".join(f"{s.memory / 1024:>8.0f}" for s in r.curve)
         print(f"{r.name:<10} {row}")
-    print(f"{'base':<10} {baseline / 1024:>8.0f} KiB after the first 1000 calls\n")
+    print(f"{'base':<10} {baseline / 1024:>8.0f} KiB after the first checkpoint\n")
 
     print("live handles at each checkpoint")
     print(f"{'case':<10} {header}")
@@ -136,11 +153,12 @@ def main() -> int:
     from moonbridge import moonbitlang__core__json as mjson  # noqa: PLC0415
     from moonbridge import moonbitlang__core__lexbuf as mlex  # noqa: PLC0415
 
-    global hook, hook_rt
+    global hook, hook_rt, POINTS
     hook, hook_rt = _wasmtime.open_runtime(Path(args.wasm))
     _runtime.set_default(hook_rt)
 
     calls = args.calls
+    POINTS = checkpoints_for(calls)
     results: list[Result] = []
 
     results.append(measure("valid", calls, lambda i: mjson.valid(DOC)))
@@ -166,6 +184,10 @@ def main() -> int:
                 keep.pop(0)
 
     results.append(measure("parse/gc", calls, parse_and_drop))
+    # How many wrappers were *actually* retained: with a short run the
+    # `i % 997` cadence hits fewer than SURVIVORS times, and asserting the
+    # constant would report a leak that is really just a small sample.
+    parse_survivors = len(keep)
     keep.clear()
     gc.collect()
     hook_rt.flush()
@@ -195,6 +217,7 @@ def main() -> int:
                 positions.pop(0)
 
     results.append(measure("ctor/gc", calls, construct_and_drop))
+    ctor_survivors = len(positions)
     positions.clear()
     gc.collect()
     hook_rt.flush()
@@ -224,8 +247,9 @@ def main() -> int:
         if not ok:
             failures += 1
 
+    held = {"parse/gc": parse_survivors, "ctor/gc": ctor_survivors}
     for r in results:
-        expected = SURVIVORS if r.name in ("parse/gc", "ctor/gc") else 0
+        expected = held.get(r.name, 0)
         check(
             f"{r.name} released everything",
             r.live_end == expected,
@@ -248,6 +272,9 @@ def main() -> int:
     # Wasm memory only grows, so a leak shows up as a curve that keeps
     # climbing. A steady one is the whole claim.
     for r in results:
+        if len(r.curve) < 2:
+            print(f"skip {r.name} memory plateaus: only one sample in {r.calls} calls")
+            continue
         last, previous = r.curve[-1], r.curve[-2]
         check(
             f"{r.name} memory plateaus",
