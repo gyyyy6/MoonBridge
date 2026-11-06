@@ -49,8 +49,15 @@ bash scripts/corpus.sh core    # 只跑标准库，离线可用
 ## 结果
 
 ```
-files=501 passed=501 failed=0 declarations=17793 parse_rate=100.0%
+files=501 passed=501 failed=0 declarations=17793 parse_rate=100.0% types=5528 edges=11361 files_with_cycles=48
 ```
+
+除了解析，脚本还会对每个文件**建类型图**（`--graph`）：5,528 个类型节点、11,361 条引用边，
+其中 48 个包的接口里存在自引用或互递归类型。建图没有崩溃、没有无限递归，
+说明 `cycles()` 的 SCC 分组在这些真实图上是可用的。
+
+这条检查的价值在于：解析"成功"但产出错乱的 AST，往往要到建图阶段才会暴露
+（例如 `Self` 没被识别、泛型参数被当成类型，都会让图里冒出不该存在的节点）。
 
 ## 语料逼出来的语法缺口
 

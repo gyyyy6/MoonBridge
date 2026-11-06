@@ -110,4 +110,6 @@ echo "corpus: $count interface files"
 echo
 
 cd "$ROOT"
-moon run --target js src/cli -- --quiet --list "$(to_native "$LIST")"
+# --graph also builds the type graph for each file, so a parse that succeeds
+# but yields nonsense is caught here rather than in the generator.
+moon run --target js src/cli -- --quiet --graph --list "$(to_native "$LIST")"
