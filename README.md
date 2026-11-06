@@ -14,8 +14,11 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
                                             wasm 模块 / native 库
 ```
 
-> 状态：**Spike 01 已通过**（2026-11-06）。调用 ABI、内存共享、宿主↔MoonBit 字节流、
-> UTF-8 往返全部跑通，实测数据见 [spikes/01-wasm-python](spikes/01-wasm-python/)。
+> 状态：**S0 通过、S1 通过**（2026-11-06）。
+> S0：调用 ABI、内存共享、宿主↔MoonBit 字节流、UTF-8 往返全部跑通，实测见
+> [spikes/01-wasm-python](spikes/01-wasm-python/)。
+> S1：`.mbti` 解析器 + 类型图，在 **501 个真实接口文件 / 17,793 条声明**上 100% 通过，
+> 见 [S1 语料报告](docs/s1-corpus-report.md)。
 
 ---
 
@@ -62,6 +65,35 @@ MoonBridge 补的是这一层：**不是给某个库手写一层包装，而是�
 
 ---
 
+## S1：接口解析与类型图
+
+`moon info` 输出的 `.mbti` 是纯文本接口，但它是**生成的**、且随工具链版本演进的。
+MoonBridge 用一个手写递归下降解析器把它读成 AST，再建成类型图：
+
+```text
+.mbti  ──lexer──▶ token ──parser──▶ AST ──graph──▶ 类型图
+                                                  │
+                                     依赖顺序 / 互递归组 / 外部类型
+```
+
+```bash
+# 解析若干接口文件，逐文件汇报，任一失败则退出码非 0
+moon run --target js src/cli -- path/to/pkg.generated.mbti ...
+
+# 跑真实语料（标准库 + 20 个已发布模块及其依赖）
+bash scripts/corpus.sh all
+```
+
+已覆盖的语法（全部由真实语料逼出来，明细见
+[S1 语料报告](docs/s1-corpus-report.md#语料逼出来的语法缺口)）：泛型与 trait 约束、
+函数类型、`T??`、`&Trait`、`async fn`、`raise` / `raise E` / `noraise` / `nocancel`
+及其 `+` 组合、`pub(all)` / `pub(open)` / `priv`、`mut` 字段、构造器标签字段、
+`const` 字面量、`type X = Y` 别名、重导出块、旧式 `import( … )` 块。
+
+类型图回答三个生成器必需的问题：**先发哪个类型**（`topo_order`）、
+**哪些类型互相递归必须一起产**（`cycles`，Tarjan SCC）、
+**哪些类型不在本包**（`external_names`，交给宿主类型表）。
+
 ## 开发
 
 ```bash
@@ -70,10 +102,17 @@ moon check --deny-warn
 moon test  --deny-warn
 moon fmt --check
 
+# 语料（core 子集离线可跑；all 需要网络）
+bash scripts/corpus.sh core
+bash scripts/corpus.sh all
+
 # Spike 复现（需要 Python 3.10+ 与 wasmtime）
 cd spikes/01-wasm-python/module && moon build --target wasm && cd ..
 python bridge_test.py
 ```
+
+> CLI 目前在 js 后端运行（唯一不依赖 C 工具链的后端），文件读取只有一处
+> `extern "js"`，其余代码与目标无关。
 
 工具链：MoonBit `0.1.20261023`（moonc `0.10.17`）/ Python 3.13 / wasmtime 50.0.1。
 
@@ -82,7 +121,8 @@ python bridge_test.py
 ## 路线图
 
 - [x] **S0** 宿主 ABI 可行性：wasm 导出、内存共享、UTF-8 往返
-- [ ] **S1** 接口 IR：解析 `moon info`，覆盖 struct / enum / 泛型 / trait / 别名
+- [x] **S1** 接口 IR：解析 `moon info`，覆盖 struct / enum / 泛型 / trait / 别名
+      （501 个真实接口文件 100% 通过，见 [报告](docs/s1-corpus-report.md)）
 - [ ] **S2** 类型映射与代码生成：函数 + 值类型，生成 `.pyi` 并通过 mypy strict
 - [ ] **S3** 句柄表与生命周期：`__del__` 回收、环引用、10 万次往返 0 泄漏
 - [ ] **S4** 集合 / `Option` / `Result` / 回调 / 异常映射
