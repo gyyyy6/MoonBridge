@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  moonbit:
+    name: MoonBit (check / test / fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain
+        run: moon version --all
+
+      - name: Check
+        run: moon check --deny-warn
+
+      - name: Test
+        run: moon test --deny-warn
+
+      - name: Format
+        run: moon fmt --check
+
+  spike-wasm-python:
+    name: Spike 01 (Python <-> Wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build spike module
+        working-directory: spikes/01-wasm-python/module
+        run: moon build --target wasm --release
+
+      - name: Install wasmtime
+        run: python -m pip install --disable-pip-version-check wasmtime==50.0.1
+
+      - name: Run host boundary tests
+        working-directory: spikes/01-wasm-python
+        run: python bridge_test.py module/_build/wasm/release/build/moonbridge-spike.wasm

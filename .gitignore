@@ -1,0 +1,29 @@
+# Build output
+_build/
+target/
+dist/
+build/
+
+# MoonBit package cache
+.mooncakes/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.so
+*.pyd
+*.dll
+
+# JS
+node_modules/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
