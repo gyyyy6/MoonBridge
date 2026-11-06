@@ -35,6 +35,31 @@ fn set_exit_code(code : Int32) -> Unit {
 }
 
 ///|
+/// Writes a UTF-8 file, creating nothing on the way: the caller makes the
+/// directory first so a typo in the output path fails loudly.
+#cfg(target="js")
+extern "js" fn write_text_file(path : String, data : String) -> Bool = "function (path, data) { try { require('fs').writeFileSync(path, data, 'utf8'); return true } catch (e) { console.error(String(e)); return false } }"
+
+///|
+#cfg(not(target="js"))
+fn write_text_file(path : String, data : String) -> Bool {
+  ignore(path)
+  ignore(data)
+  false
+}
+
+///|
+#cfg(target="js")
+extern "js" fn make_dir(path : String) -> Bool = "function (path) { try { require('fs').mkdirSync(path, { recursive: true }); return true } catch (e) { return false } }"
+
+///|
+#cfg(not(target="js"))
+fn make_dir(path : String) -> Bool {
+  ignore(path)
+  false
+}
+
+///|
 /// Aggregate counters over a corpus run.
 priv struct Tally {
   mut files : Int32
@@ -77,10 +102,117 @@ fn format_rate(rate : Double) -> String {
 }
 
 ///|
+/// Aggregate counters over a generation run.
+priv struct GenTally {
+  mut stubs : Int32
+  mut failed : Int32
+  mut types : Int32
+  mut funcs : Int32
+  mut fields : Int32
+  mut skipped : Int32
+  mut degraded : Int32
+}
+
+///|
+fn GenTally::new() -> GenTally {
+  {
+    stubs: 0,
+    failed: 0,
+    types: 0,
+    funcs: 0,
+    fields: 0,
+    skipped: 0,
+    degraded: 0,
+  }
+}
+
+///|
+/// Generates one stub per input file into `<out_dir>/moonbridge/`, together
+/// with the runtime module the stubs import. Returns the number of failures.
+fn run_gen(files : Array[String], out_dir : String) -> Int32 {
+  let pkg_dir = out_dir + "/moonbridge"
+  if !make_dir(pkg_dir) {
+    println("error: cannot create " + pkg_dir)
+    return 1
+  }
+  ignore(write_text_file(pkg_dir + "/__init__.py", @gen.render_init()))
+  ignore(write_text_file(pkg_dir + "/_runtime.py", @gen.render_runtime()))
+  ignore(write_text_file(pkg_dir + "/py.typed", ""))
+  let tally = GenTally::new()
+  // Two packages can flatten to the same module stem; writing both would lose
+  // one silently, so a collision is a hard failure.
+  let stems : Map[String, String] = Map([])
+  for path in files {
+    let src = read_text_file(path)
+    if src == "" {
+      tally.failed = tally.failed + 1
+      println("FAIL " + path + ": cannot read file")
+      continue
+    }
+    match @mbti.parse_result(src) {
+      Ok(pkg) => {
+        let stub = @gen.generate(pkg, @gen.GenOptions::standard())
+        match stems.get(stub.module_name) {
+          Some(other) =>
+            if other != pkg.name {
+              tally.failed = tally.failed + 1
+              println(
+                "FAIL " +
+                pkg.name +
+                ": module stem " +
+                stub.module_name +
+                " already used by " +
+                other,
+              )
+              continue
+            }
+          None => ()
+        }
+        stems.set(stub.module_name, pkg.name)
+        if !write_text_file(pkg_dir + "/" + stub.filename, stub.text) {
+          tally.failed = tally.failed + 1
+          println("FAIL " + pkg.name + ": cannot write " + stub.filename)
+          continue
+        }
+        tally.stubs = tally.stubs + 1
+        tally.types = tally.types + stub.types
+        tally.funcs = tally.funcs + stub.funcs
+        tally.fields = tally.fields + stub.fields
+        tally.skipped = tally.skipped + stub.skipped
+        tally.degraded = tally.degraded + stub.degraded.length()
+      }
+      Err(msg) => {
+        tally.failed = tally.failed + 1
+        println("FAIL " + path + ": " + msg)
+      }
+    }
+  }
+  println("")
+  println(
+    "stubs=" +
+    tally.stubs.to_string() +
+    " failed=" +
+    tally.failed.to_string() +
+    " types=" +
+    tally.types.to_string() +
+    " funcs=" +
+    tally.funcs.to_string() +
+    " fields=" +
+    tally.fields.to_string() +
+    " skipped=" +
+    tally.skipped.to_string() +
+    " degraded=" +
+    tally.degraded.to_string(),
+  )
+  tally.failed
+}
+
+///|
 fn main {
   let args = @env.args()
   let mut quiet = false
   let mut want_graph = false
+  let mut gen_dir : String? = None
   let files : Array[String] = []
   let mut i = 2 // argv[0] is the node binary, argv[1] is this script
   while i < args.length() {
@@ -91,6 +223,10 @@ fn main {
       // Also build the type graph, which is where a parse that "succeeded"
       // but produced nonsense would show up.
       want_graph = true
+    } else if arg == "--gen" && i + 1 < args.length() {
+      // Generate Python stubs instead of reporting parse statistics.
+      i = i + 1
+      gen_dir = Some(args[i])
     } else if arg == "--list" && i + 1 < args.length() {
       // A manifest of paths, one per line: large corpora overflow argv.
       i = i + 1
@@ -107,10 +243,20 @@ fn main {
   }
   if files.length() == 0 {
     println(
-      "usage: moon run --target js src/cli -- [--quiet] [--list <manifest>] <file.mbti>...",
+      "usage: moon run --target js src/cli -- [--quiet] [--graph] [--gen <dir>] [--list <manifest>] <file.mbti>...",
     )
     set_exit_code(2)
     return
+  }
+  match gen_dir {
+    Some(dir) => {
+      let failures = run_gen(files, dir)
+      if failures > 0 {
+        set_exit_code(1)
+      }
+      return
+    }
+    None => ()
   }
   let tally = Tally::new()
   for path in files {
