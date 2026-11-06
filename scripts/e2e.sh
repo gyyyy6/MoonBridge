@@ -23,7 +23,11 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="${GEN_OUT:-$ROOT/_gen}"
 WASM="$ROOT/_build/wasm/release/build/guest_gen/guest_gen.wasm"
-BOUND="moonbitlang/core/json,moonbitlang/core/builtin,moonbitlang/core/lexbuf"
+# `callbacks` is this repository's own package: it exists so the callback
+# channel has something that actually calls a function value, which nothing in
+# the standard library does.
+BOUND="moonbitlang/core/json,moonbitlang/core/builtin,moonbitlang/core/lexbuf,gyyyy6/moonbridge/callbacks"
+PROBE="$ROOT/src/callbacks/pkg.generated.mbti"
 
 to_native() {
   if command -v cygpath >/dev/null 2>&1; then
@@ -54,14 +58,23 @@ echo "== building the generator =="
 moon build --target js
 
 echo
+echo "== interface dump for the callback probe =="
+# `*.generated.mbti` is a build artifact and is not checked in, so the probe
+# package's interface has to be written before the generator can read it.
+moon info >/dev/null
+
+echo
 echo "== generating stubs, bindings and the guest =="
 rm -rf "$OUT"
+# The probe package is passed as a file rather than through the manifest: the
+# manifest is the standard library dump, and this package is neither.
 moon run --target js src/cli -- \
   --gen "$(to_native "$OUT")" \
   --bind "$BOUND" \
   --guest "$BOUND" \
   --guest-out "$(to_native "$ROOT/src/guest_gen")" \
-  --list "$(to_native "$ROOT/_corpus/manifest.txt")"
+  --list "$(to_native "$ROOT/_corpus/manifest.txt")" \
+  "$(to_native "$PROBE")"
 
 # The generator writes readable but unformatted code; `moon fmt` makes the
 # checked-in copy the same file every run produces.

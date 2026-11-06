@@ -34,6 +34,7 @@ def main() -> int:
     from moonbridge import moonbitlang__core__builtin as mbuiltin  # noqa: PLC0415
     from moonbridge import moonbitlang__core__json as mjson  # noqa: PLC0415
     from moonbridge import moonbitlang__core__lexbuf as mlex  # noqa: PLC0415
+    from moonbridge import gyyyy6__moonbridge__callbacks as mcb  # noqa: PLC0415
 
     host, rt = _wasmtime.open_runtime(Path(args.wasm))
     # The generated functions reach the runtime through the module-level
@@ -115,6 +116,69 @@ def main() -> int:
     else:
         failures += 1
         print("FAIL parse error was not raised")
+
+    print()
+    print("-- S5: containers, callables, typed errors --")
+
+    # A Python list is a MoonBit `Array[Json]`: no wrapper, no conversion, the
+    # caller writes the type the stub declares.
+    arr = mbuiltin.Json.array([mbuiltin.Json.number(1.0), mbuiltin.Json.string("two")])
+    check("list -> Array[Json]", arr.stringify(), '[1,"two"]')
+    arr.close()
+
+    # A Python dict is a MoonBit `Map[String, Json]`, keys and values included.
+    obj = mbuiltin.Json.object_({"a": mbuiltin.Json.number(1.0)})
+    check("dict -> Map[String, Json]", obj.stringify(), '{"a":1}')
+    obj.close()
+    check("live after containers", host.live_handles(), 0)
+
+    # A Python callable becomes an `Int32` id, and the guest calls back through
+    # a wasm import: the call happens while the guest is still on the stack.
+    calls: list[int] = []
+
+    def bump() -> int:
+        calls.append(1)
+        return 40
+
+    check("callback returns", mcb.call_int(bump), 40)
+    check("callback was called", len(calls), 1)
+
+    # An argument crosses the callback boundary too, in both directions.
+    check("callback with argument", mcb.call_with(lambda x: x + 2, 40), 42)
+
+    # Two callbacks in one frame, evaluated in the order the guest chooses.
+    check("two callbacks", mcb.call_both(lambda: 1, lambda x: x * 10, 3), 40)
+
+    # `None` survives as `None` rather than as a zero value.
+    check("callback returning a value", mcb.call_opt(lambda: "here"), "here")
+    check("callback returning none", mcb.call_opt(lambda: None), "<none>")
+
+    # An exception raised inside a callback cannot unwind through the guest, so
+    # it is carried out and re-raised from the outer call.
+    def explode() -> int:
+        raise ValueError("from the callback")
+
+    try:
+        mcb.call_int(explode)
+    except ValueError as exc:
+        print("ok   callback exception re-raised:", exc)
+    else:
+        failures += 1
+        print("FAIL callback exception was swallowed")
+
+    # `parse` raises the `suberror` the guest names, so the generated class is
+    # what a caller writes `except` for — not a bare `MoonError`.
+    check("ParseError class exists", hasattr(mjson, "ParseError"), True)
+    try:
+        mjson.parse("{oops")
+    except mjson.ParseError as exc:
+        print("ok   typed exception:", type(exc).__name__, exc)
+    except _runtime.MoonError as exc:
+        failures += 1
+        print(f"FAIL typed exception was generic: {type(exc).__name__}: {exc}")
+    else:
+        failures += 1
+        print("FAIL typed exception was not raised")
 
     # The stub says `stringify` returns `str` and that a document is a `Json`.
     # If either were a wish rather than the truth, this is where it shows.
