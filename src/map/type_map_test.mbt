@@ -179,6 +179,19 @@ test "self resolves inside a type" {
 }
 
 ///|
+test "type variables only in the return position degrade" {
+  // `fn[T] make() -> Box[T]` cannot be expressed in Python: the caller cannot
+  // choose `T`, so the position becomes `Any` rather than failing mypy.
+  let declared : Map[String, Bool] = Map([])
+  declared.set("T", true)
+  let bound : Map[String, Bool] = Map([])
+  let ty = @map.PyHandle("Box", [@map.PyVar("T")])
+  assert_eq(ty.drop_unbound(declared, bound).render(), "Box[Any]")
+  bound.set("T", true)
+  assert_eq(ty.drop_unbound(declared, bound).render(), "Box[T]")
+}
+
+///|
 test "deep nesting is cut off" {
   let m = @map.Mapper::new("demo")
   let mut deep = int_ty()

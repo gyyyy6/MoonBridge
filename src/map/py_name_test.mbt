@@ -62,6 +62,19 @@ test "non-ascii letters are kept" {
 }
 
 ///|
+test "stub names avoid what they would shadow" {
+  // A member called `int` or `property` breaks every annotation and decorator
+  // in the class body, so members move aside; a type called `Protocol` would
+  // hide the import for the whole module.
+  assert_eq(@map.stub_name("int"), "int_")
+  assert_eq(@map.stub_name("property"), "property_")
+  assert_eq(@map.stub_name("staticmethod"), "staticmethod_")
+  assert_eq(@map.stub_name("Protocol"), "Protocol_")
+  assert_eq(@map.stub_name("parse"), "parse")
+  assert_eq(@map.stub_name("class"), "class_")
+}
+
+///|
 test "module stems flatten package paths" {
   assert_eq(
     @map.module_stem("moonbitlang/core/json"),

@@ -76,6 +76,33 @@ pub fn is_stub_binding(name : String) -> Bool {
 }
 
 ///|
+/// Names a class member must not take.
+///
+/// A member shadows the name for the whole class body, including the
+/// annotations and decorators above it: a field called `property` makes every
+/// `@property` in that class resolve to a `str`, and a method called `int`
+/// breaks every `int` annotation below it.
+pub fn is_shadow_sensitive(name : String) -> Bool {
+  match name {
+    "int"
+    | "float"
+    | "bool"
+    | "str"
+    | "bytes"
+    | "list"
+    | "dict"
+    | "tuple"
+    | "object"
+    | "set"
+    | "type"
+    | "property"
+    | "staticmethod"
+    | "classmethod" => true
+    _ => is_stub_binding(name)
+  }
+}
+
+///|
 /// Turns any string into a valid Python identifier.
 ///
 /// ASCII letters, digits, `_` and non-ASCII code points are kept (Python 3
@@ -106,6 +133,22 @@ pub fn python_identifier(raw : String) -> String {
     out = out + "_"
   }
   out
+}
+
+///|
+/// The name a stub introduces for a MoonBit declaration.
+///
+/// This is `python_identifier` plus one more rule: the name must not shadow a
+/// builtin type, a decorator, or an import the stub relies on. A class called
+/// `Protocol` would hide `typing.Protocol` for the whole module, so it becomes
+/// `Protocol_` — and every reference to it must use the same function.
+pub fn stub_name(raw : String) -> String {
+  let name = python_identifier(raw)
+  if is_shadow_sensitive(name) {
+    name + "_"
+  } else {
+    name
+  }
 }
 
 ///|

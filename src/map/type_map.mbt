@@ -91,6 +91,55 @@ pub fn PyType::render(self : PyType) -> String {
 }
 
 ///|
+/// Appends the name of every type variable mentioned by `self`.
+pub fn PyType::collect_vars(self : PyType, out : Map[String, Bool]) -> Unit {
+  match self {
+    PyVar(name) => out.set(name, true)
+    PyList(inner) | PySeq(inner) | PyOptional(inner) => inner.collect_vars(out)
+    PyDict(k, v) => {
+      k.collect_vars(out)
+      v.collect_vars(out)
+    }
+    PyTuple(items) => items.each(fn(t) { t.collect_vars(out) })
+    PyHandle(_, args) => args.each(fn(t) { t.collect_vars(out) })
+    _ => ()
+  }
+}
+
+///|
+/// Replaces a type variable with `Any` when it is declared by the enclosing
+/// function but no parameter mentions it.
+///
+/// `fn[T] make() -> T` cannot be expressed in Python: the caller has no way to
+/// choose `T`, and mypy rejects the signature ("a function returning TypeVar
+/// should receive at least one argument containing the same TypeVar"). Saying
+/// `Any` is the honest translation of "the caller must decide, and cannot".
+pub fn PyType::drop_unbound(
+  self : PyType,
+  declared : Map[String, Bool],
+  bound : Map[String, Bool],
+) -> PyType {
+  match self {
+    PyVar(name) =>
+      if declared.contains(name) && !bound.contains(name) {
+        PyAny
+      } else {
+        self
+      }
+    PyList(inner) => PyList(inner.drop_unbound(declared, bound))
+    PySeq(inner) => PySeq(inner.drop_unbound(declared, bound))
+    PyOptional(inner) => PyOptional(inner.drop_unbound(declared, bound))
+    PyDict(k, v) =>
+      PyDict(k.drop_unbound(declared, bound), v.drop_unbound(declared, bound))
+    PyTuple(items) =>
+      PyTuple(items.map(fn(t) { t.drop_unbound(declared, bound) }))
+    PyHandle(name, args) =>
+      PyHandle(name, args.map(fn(t) { t.drop_unbound(declared, bound) }))
+    _ => self
+  }
+}
+
+///|
 /// `true` when the type is the degraded fallback. Used by tests and reports to
 /// count how much of an interface lost precision.
 pub fn PyType::is_any(self : PyType) -> Bool {
@@ -308,7 +357,7 @@ fn Mapper::map_at(self : Mapper, ty : @mbti.TypeExpr, depth : Int32) -> PyType {
     @mbti.TypeExpr::Named(q, args) => self.map_named(q, args, depth)
     @mbti.TypeExpr::SelfType(args) =>
       match self.self_name {
-        Some(name) => PyHandle(name, self.map_args(args, depth))
+        Some(name) => PyHandle(stub_name(name), self.map_args(args, depth))
         None => {
           self.note(UnboundSelf)
           PyAny
@@ -366,7 +415,7 @@ fn Mapper::map_named(
           self.note(ArityMismatch(q.name, 0, args.length()))
           return PyAny
         }
-        return PyVar(q.name)
+        return PyVar(stub_name(q.name))
       }
       match self.map_builtin(q.name, args, depth) {
         Some(t) => t
@@ -380,10 +429,10 @@ fn Mapper::map_named(
                 self.note(ArityMismatch(q.name, -1, args.length()))
                 PyAny
               } else {
-                PyHandle(q.name, [])
+                PyHandle(stub_name(q.name), [])
               }
             } else if arity == args.length() {
-              PyHandle(q.name, self.map_args(args, depth))
+              PyHandle(stub_name(q.name), self.map_args(args, depth))
             } else {
               self.note(ArityMismatch(q.name, arity, args.length()))
               PyAny
