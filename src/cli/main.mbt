@@ -156,6 +156,8 @@ fn run_gen(
   files : Array[String],
   out_dir : String,
   bind : Array[String],
+  guest : Array[String],
+  guest_out : String?,
 ) -> Int32 {
   let pkg_dir = out_dir + "/moonbridge"
   if !make_dir(pkg_dir) {
@@ -195,6 +197,14 @@ fn run_gen(
   }
   let world = @map.World::build(pkgs)
   println("link: " + world.summary())
+  // What the generated guest will be able to answer. Built before anything is
+  // written, because the Python modules need it too: a property or a
+  // constructor only gets a body when the guest has a symbol behind it.
+  let plan = if guest.length() > 0 {
+    Some(@gen.Plan::build(world, pkgs, guest))
+  } else {
+    None
+  }
   // Two packages can flatten to the same module stem; writing both would lose
   // one silently, so a collision is a hard failure.
   let stems : Map[String, String] = Map([])
@@ -260,6 +270,7 @@ fn run_gen(
         let module_ = @gen.bind_with(
           Some(world),
           pkg,
+          plan,
           @gen.GenOptions::standard(),
         )
         if write_text_file(pkg_dir + "/" + module_.filename, module_.text) {
@@ -275,6 +286,61 @@ fn run_gen(
         println("FAIL --bind " + target + ": not among the input interfaces")
       }
     }
+  }
+  // The guest: the MoonBit half of the binding, generated from the same plan
+  // the Python side is read off.
+  match guest_out {
+    Some(dir) =>
+      if guest.length() == 0 {
+        tally.failed = tally.failed + 1
+        println("FAIL --guest-out needs --guest")
+      } else if !make_dir(dir) {
+        tally.failed = tally.failed + 1
+        println("error: cannot create " + dir)
+      } else {
+        // Two guest packages imported under the same alias cannot be told
+        // apart in the generated source, so a collision has to be a failure.
+        let aliases : Map[String, String] = Map([])
+        let mut clash = ""
+        for path in guest {
+          let at = @map.pkg_alias(path)
+          match aliases.get(at) {
+            Some(other) =>
+              clash = at + " is claimed by both " + other + " and " + path
+            None => aliases.set(at, path)
+          }
+        }
+        if clash != "" {
+          tally.failed = tally.failed + 1
+          println("FAIL alias clash: " + clash)
+        } else {
+          let built = plan.unwrap()
+          println("guest: " + built.summary())
+          for entry in built.skipped {
+            match entry {
+              (reason, n) =>
+                println("  skipped " + reason + "=" + n.to_string())
+            }
+          }
+          let abi = "gyyyy6/moonbridge/abi"
+          let pkg_text = @gen.render_guest_pkg(built, abi)
+          let src_text = @gen.render_guest(built)
+          if !write_text_file(dir + "/moon.pkg", pkg_text) ||
+            !write_text_file(dir + "/guest.mbt", src_text) {
+            tally.failed = tally.failed + 1
+            println("FAIL: cannot write the guest package into " + dir)
+          } else {
+            println(
+              "guest -> " +
+              dir +
+              "/guest.mbt (" +
+              src_text.split("\n").count().to_string() +
+              " lines)",
+            )
+          }
+        }
+      }
+    None => ()
   }
   println("")
   println(
@@ -330,6 +396,8 @@ fn main {
   let mut want_graph = false
   let mut gen_dir : String? = None
   let bind : Array[String] = []
+  let guest : Array[String] = []
+  let mut guest_out : String? = None
   let files : Array[String] = []
   let mut i = 2 // argv[0] is the node binary, argv[1] is this script
   while i < args.length() {
@@ -353,6 +421,21 @@ fn main {
           bind.push(name)
         }
       }
+    } else if arg == "--guest" && i + 1 < args.length() {
+      // Packages the generated guest compiles in. Repeatable and comma
+      // separated, like `--bind`.
+      i = i + 1
+      for target in args[i].split(",") {
+        let name = target.trim().to_owned()
+        if name.length() > 0 {
+          guest.push(name)
+        }
+      }
+    } else if arg == "--guest-out" && i + 1 < args.length() {
+      // Directory for the generated MoonBit guest package. It has to be inside
+      // the module's source tree, because it is compiled like any other package.
+      i = i + 1
+      guest_out = Some(args[i])
     } else if arg == "--list" && i + 1 < args.length() {
       // A manifest of paths, one per line: large corpora overflow argv.
       i = i + 1
@@ -369,14 +452,14 @@ fn main {
   }
   if files.length() == 0 {
     println(
-      "usage: moon run --target js src/cli -- [--quiet] [--graph] [--gen <dir>] [--list <manifest>] <file.mbti>...",
+      "usage: moon run --target js src/cli -- [--quiet] [--graph] [--gen <dir>] [--bind <pkgs>] [--guest <pkgs>] [--guest-out <dir>] [--list <manifest>] <file.mbti>...",
     )
     set_exit_code(2)
     return
   }
   match gen_dir {
     Some(dir) => {
-      let failures = run_gen(files, dir, bind)
+      let failures = run_gen(files, dir, bind, guest, guest_out)
       if failures > 0 {
         set_exit_code(1)
       }

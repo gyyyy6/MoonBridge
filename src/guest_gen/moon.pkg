@@ -1,0 +1,21 @@
+import {
+  "gyyyy6/moonbridge/abi",
+  "moonbitlang/core/buffer",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/ref",
+  "moonbitlang/core/json",
+  "moonbitlang/core/lexbuf",
+  "moonbitlang/core/builtin",
+}
+
+pkgtype(kind: "foreign_library")
+
+// The host reads and writes linear memory directly, so the memory object
+// needs a stable name and the heap must not start at zero: address 0 is a
+// valid pointer, so it could not mean "no buffer".
+
+options(
+  link: {
+    "wasm": { "export-memory-name": "memory", "heap-start-address": 4096 },
+  },
+)
