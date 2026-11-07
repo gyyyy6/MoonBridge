@@ -5,6 +5,14 @@ on:
     branches: ["**"]
   pull_request:
 
+# The installer defaults to `latest`, which silently replaces both the compiler
+# and the bundled core. This repository checks in generated sources
+# (src/guest_gen) written against one specific core, so a toolchain bump turns
+# CI red on an unrelated docs commit. Pin it, and bump this value deliberately
+# together with the generated sources.
+env:
+  MOONBIT_VERSION: "0.1.20261023"
+
 jobs:
   moonbit:
     name: MoonBit (check / test / fmt)
@@ -14,8 +22,9 @@ jobs:
 
       - name: Install MoonBit
         run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s -- "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+          "$HOME/.moon/bin/moon" version --all
 
       - name: Toolchain
         run: moon version --all
@@ -37,8 +46,9 @@ jobs:
 
       - name: Install MoonBit
         run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s -- "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+          "$HOME/.moon/bin/moon" version --all
 
       - uses: actions/setup-node@v4
         with:
@@ -57,8 +67,9 @@ jobs:
 
       - name: Install MoonBit
         run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s -- "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+          "$HOME/.moon/bin/moon" version --all
 
       - uses: actions/setup-node@v4
         with:
@@ -85,8 +96,9 @@ jobs:
 
       - name: Install MoonBit
         run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s -- "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+          "$HOME/.moon/bin/moon" version --all
 
       - uses: actions/setup-node@v4
         with:
@@ -115,8 +127,9 @@ jobs:
 
       - name: Install MoonBit
         run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s -- "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+          "$HOME/.moon/bin/moon" version --all
 
       - uses: actions/setup-python@v5
         with:

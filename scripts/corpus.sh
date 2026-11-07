@@ -83,11 +83,17 @@ MOD
   } >> "$scratch/moon.mod"
 
   echo "deps corpus: resolving $(grep -cvE '^$|^#' "$ROOT/corpus/packages.txt") modules"
-  ( cd "$scratch" && moon check >/dev/null 2>&1 ) || {
+  # Keep stderr visible: when the registry is unreachable or a pinned module no
+  # longer resolves, the real reason has to show up in the CI log.
+  ( cd "$scratch" && moon check >/dev/null ) || {
     echo "deps corpus: moon check failed; the downloads may be incomplete" >&2
   }
-  find "$scratch/.mooncakes" -name '*.mbti' -print0 2>/dev/null \
-    | while IFS= read -r -d '' f; do to_native "$f"; echo; done >> "$out"
+  if [ -d "$scratch/.mooncakes" ]; then
+    find "$scratch/.mooncakes" -name '*.mbti' -print0 2>/dev/null \
+      | while IFS= read -r -d '' f; do to_native "$f"; echo; done >> "$out"
+  else
+    echo "deps corpus: no packages were downloaded; only the core corpus is available" >&2
+  fi
 }
 
 mkdir -p "$WORK"
