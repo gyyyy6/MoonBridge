@@ -74,8 +74,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install mypy
-        run: python -m pip install --disable-pip-version-check mypy
+      # The generated package includes `_wasmtime.py`, which imports the real
+      # runtime. Without wasmtime installed, mypy --strict reports
+      # `import-not-found` and a `no-any-return` where the runtime's types
+      # would have been. Pin the same version the end-to-end job runs against.
+      - name: Install type-check dependencies
+        run: python -m pip install --disable-pip-version-check mypy wasmtime==50.0.1
 
       # Generates one .pyi per package from the corpus and type-checks the
       # whole generated package. This is the S2 acceptance criterion: zero
