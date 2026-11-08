@@ -194,10 +194,11 @@ pub fn[T] HandleTable::capacity(self : HandleTable[T]) -> Int32 {
 
 ///|
 /// A handle that cannot be resolved. Raised instead of returning a wrong value.
+#derive(Debug)
 pub suberror HandleError {
   HandleTableFull(Int32)
   UnknownHandle(Int32)
-} derive(Debug)
+}
 
 ///|
 /// Like `get`, but reports a protocol error instead of `None`.

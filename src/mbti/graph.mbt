@@ -16,6 +16,7 @@
 
 ///|
 /// What a graph node stands for.
+#derive(Debug, Eq)
 pub(all) enum TypeKind {
   Struct
   Enum
@@ -27,11 +28,12 @@ pub(all) enum TypeKind {
   Alias
   /// Referenced but not declared in this package.
   External
-} derive(Debug, Eq)
+}
 
 ///|
 /// A type node. `decl_index` indexes into `Package.decls` and is `-1` for
 /// external types.
+#derive(Debug, Eq)
 pub(all) struct TypeNode {
   /// Local name for declarations, qualified text (`@builtin.Json`) for
   /// external references.
@@ -42,10 +44,11 @@ pub(all) struct TypeNode {
   decl_index : Int32
   /// `Some("@builtin")` for qualified external references.
   pkg : String?
-} derive(Debug, Eq)
+}
 
 ///|
 /// Why an edge exists.
+#derive(Debug, Eq)
 pub(all) enum EdgeKind {
   /// Struct field type or constructor payload.
   Field
@@ -55,7 +58,7 @@ pub(all) enum EdgeKind {
   Impl
   /// Alias target.
   Alias
-} derive(Debug, Eq)
+}
 
 ///|
 /// Short stable tag, used in de-duplication keys and in reports.
@@ -69,14 +72,16 @@ pub fn EdgeKind::tag(self : EdgeKind) -> String {
 }
 
 ///|
+#derive(Debug, Eq)
 pub(all) struct Edge {
   from : Int32
   to : Int32
   kind : EdgeKind
-} derive(Debug, Eq)
+}
 
 ///|
 /// Counts useful for reports and for the CLI summary line.
+#derive(Debug, Eq)
 pub(all) struct GraphStats {
   structs : Int32
   enums : Int32
@@ -85,14 +90,15 @@ pub(all) struct GraphStats {
   aliases : Int32
   externals : Int32
   edges : Int32
-} derive(Debug, Eq)
+}
 
 ///|
 /// The type graph of a single package.
+#derive(Debug, Eq)
 pub(all) struct TypeGraph {
   nodes : Array[TypeNode]
   edges : Array[Edge]
-} derive(Debug, Eq)
+}
 
 ///|
 pub fn TypeGraph::node_count(self : TypeGraph) -> Int32 {

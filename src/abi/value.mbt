@@ -21,6 +21,7 @@
 //! is the generator's decision, not the protocol's.
 
 ///|
+#derive(Debug, Eq)
 pub(all) enum Value {
   Null
   Bool(Bool)
@@ -34,7 +35,7 @@ pub(all) enum Value {
   Map(Array[(Value, Value)])
   /// An object that stayed in the guest's heap, addressed by handle id.
   Handle(Int32)
-} derive(Debug, Eq)
+}
 
 ///|
 pub fn Value::unit() -> Value {

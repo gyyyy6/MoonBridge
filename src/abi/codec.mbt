@@ -21,9 +21,10 @@
 //! strategy.
 
 ///|
+#derive(Debug)
 pub suberror DecodeError {
   DecodeError(String)
-} derive(Debug)
+}
 
 ///|
 const TAG_NULL : Int32 = 0
@@ -262,6 +263,7 @@ pub fn decode(data : Bytes) -> Value raise DecodeError {
 
 ///|
 /// The outcome of one call, as it travels back to the host.
+#derive(Debug)
 pub(all) enum Status {
   Ok(Value)
   /// The guest raised a `suberror`; the string is its rendered message.
@@ -275,7 +277,7 @@ pub(all) enum Status {
   FailedAs(String, String)
   /// The guest panicked or hit an unreachable state.
   Panicked(String)
-} derive(Debug)
+}
 
 ///|
 const STATUS_OK : Int32 = 0

@@ -31,7 +31,6 @@ def main() -> int:
 
     sys.path.insert(0, str(Path(args.package).resolve()))
     from moonbridge import _runtime, _wasmtime  # noqa: PLC0415
-    from moonbridge import moonbitlang__core__builtin as mbuiltin  # noqa: PLC0415
     from moonbridge import moonbitlang__core__json as mjson  # noqa: PLC0415
     from moonbridge import moonbitlang__core__lexbuf as mlex  # noqa: PLC0415
     from moonbridge import gyyyy6__moonbridge__callbacks as mcb  # noqa: PLC0415
@@ -91,7 +90,7 @@ def main() -> int:
     print("-- handles through functions --")
     doc = mjson.parse('{"b": "x", "a": [1, 2, 3]}')
     print("ok   parse ->", doc, "handle", doc.handle_id)
-    check("parse returns a Json", isinstance(doc, mbuiltin.Json), True)
+    check("parse returns a Json", isinstance(doc, mjson.Json), True)
     check("round trip", doc.stringify(), '{"b":"x","a":[1,2,3]}')
     check("live after parse", host.live_handles(), 1)
 
@@ -122,12 +121,12 @@ def main() -> int:
 
     # A Python list is a MoonBit `Array[Json]`: no wrapper, no conversion, the
     # caller writes the type the stub declares.
-    arr = mbuiltin.Json.array([mbuiltin.Json.number(1.0), mbuiltin.Json.string("two")])
+    arr = mjson.Json.array([mjson.Json.number(1.0), mjson.Json.string("two")])
     check("list -> Array[Json]", arr.stringify(), '[1,"two"]')
     arr.close()
 
     # A Python dict is a MoonBit `Map[String, Json]`, keys and values included.
-    obj = mbuiltin.Json.object_({"a": mbuiltin.Json.number(1.0)})
+    obj = mjson.Json.object_({"a": mjson.Json.number(1.0)})
     check("dict -> Map[String, Json]", obj.stringify(), '{"a":1}')
     obj.close()
     check("live after containers", host.live_handles(), 0)

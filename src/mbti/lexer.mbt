@@ -11,16 +11,18 @@
 
 ///|
 /// A lexical token together with its 1-based source position.
+#derive(Debug, Eq)
 pub(all) struct Token {
   kind : Tok
   line : Int32
   col : Int32
-} derive(Debug, Eq)
+}
 
 ///|
 
 ///|
 /// Token kinds produced by `tokenize`.
+#derive(Debug, Eq)
 pub(all) enum Tok {
   /// Identifier or keyword; the parser decides which by text.
   Ident(String)
@@ -34,7 +36,7 @@ pub(all) enum Tok {
   Newline
   /// End of input.
   Eof
-} derive(Debug, Eq)
+}
 
 ///|
 

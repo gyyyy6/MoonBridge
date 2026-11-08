@@ -21,6 +21,7 @@
 
 ///|
 /// A Python type expression.
+#derive(Debug, Eq)
 pub(all) enum PyType {
   PyInt
   PyFloat
@@ -45,7 +46,7 @@ pub(all) enum PyType {
   /// A generated class standing in for a MoonBit value: name plus type
   /// arguments, rendered as `Name` or `Name[Int]`.
   PyHandle(String, Array[PyType])
-} derive(Debug, Eq)
+}
 
 ///|
 /// Renders a comma-separated list of type expressions.
@@ -181,6 +182,7 @@ pub fn PyType::is_any(self : PyType) -> Bool {
 /// Why a type had to be degraded. The variants are exhaustive on purpose: the
 /// mapping report groups by reason, so a new reason must be added deliberately
 /// rather than folded into a generic "unsupported" bucket.
+#derive(Debug, Eq)
 pub(all) enum Degrade {
   /// `@json.Json` — a type from another package. S2 emits one stub per package
   /// and never imports across packages, so foreign types become `Any`.
@@ -202,7 +204,7 @@ pub(all) enum Degrade {
   TooDeep
   /// `Self` used outside a type that could name itself.
   UnboundSelf
-} derive(Debug, Eq)
+}
 
 ///|
 /// One-line explanation, used in generated comments and in the mapping report.
@@ -229,6 +231,7 @@ pub fn Degrade::describe(self : Degrade) -> String {
 /// The mapping context. It is cheap to copy, and copies share `locals` and
 /// `degraded`, which is what lets `Mapper::for_decl` narrow the bound type
 /// variables without losing the error trail.
+#derive(Debug)
 pub(all) struct Mapper {
   /// Package under generation; recorded on notes.
   pkg : String
@@ -254,7 +257,7 @@ pub(all) struct Mapper {
   depth_limit : Int32
   /// Every degradation, in encounter order.
   degraded : Array[Degrade]
-} derive(Debug)
+}
 
 ///|
 pub fn Mapper::new(pkg : String) -> Mapper {

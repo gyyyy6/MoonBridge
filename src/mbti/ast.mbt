@@ -7,6 +7,7 @@
 
 ///|
 /// How much of a declaration is visible outside its package.
+#derive(Debug, Eq)
 pub(all) enum Access {
   /// `pub(all)`: constructors and fields are part of the public API.
   Open
@@ -16,15 +17,16 @@ pub(all) enum Access {
   ReadOnly
   /// `priv`, or a plain `type` declaration with no visibility modifier.
   Private
-} derive(Debug, Eq)
+}
 
 ///|
 /// A possibly package-qualified name: `Array`, `Self`, `@builtin.ToJson`.
+#derive(Debug, Eq)
 pub(all) struct QName {
   /// `Some("@builtin")` when the source wrote `@builtin.ToJson`.
   pkg : String?
   name : String
-} derive(Debug, Eq)
+}
 
 ///|
 pub fn QName::plain(name : String) -> QName {
@@ -46,6 +48,7 @@ pub fn QName::to_string(self : QName) -> String {
 
 ///|
 /// How a value parameter was written in a signature.
+#derive(Debug, Eq)
 pub(all) enum ParamKind {
   /// `fn f(Int)` — positional.
   Positional
@@ -53,21 +56,23 @@ pub(all) enum ParamKind {
   Optional
   /// `fn f(name~ : Int)` — label only.
   Labeled
-} derive(Debug, Eq)
+}
 
 ///|
 /// One parameter of a function type or declaration.
+#derive(Debug, Eq)
 pub(all) struct Param {
   kind : ParamKind
   /// `None` for positional parameters.
   name : String?
   ty : TypeExpr
-} derive(Debug, Eq)
+}
 
 ///|
 /// The effect annotation trailing a function type. MoonBit lets effects be
 /// combined: `-> Unit noraise + nocancel` is legal, so this is a flag set
 /// rather than a single tag.
+#derive(Debug, Eq)
 pub(all) struct Effect {
   /// `raise` or `raise E`.
   raises : Bool
@@ -79,7 +84,7 @@ pub(all) struct Effect {
   no_cancel : Bool
   /// The declared error type of `raise E`, when present.
   error : TypeExpr?
-} derive(Debug, Eq)
+}
 
 ///|
 pub fn Effect::pure() -> Effect {
@@ -101,6 +106,7 @@ pub fn Effect::is_pure(self : Effect) -> Bool {
 ///|
 /// A type as written in an interface: the only structural sharing is through
 /// `Array[TypeExpr]`, so the tree is cheap to walk and easy to compare.
+#derive(Debug, Eq)
 pub(all) enum TypeExpr {
   /// `Int`, `Array[Int]`, `@builtin.ToJson`.
   Named(QName, Array[TypeExpr])
@@ -118,7 +124,7 @@ pub(all) enum TypeExpr {
   Async(TypeExpr)
   /// `Unit`.
   Unit
-} derive(Debug, Eq)
+}
 
 ///|
 /// Appends every named type mentioned by `self` to `out`, including names
@@ -164,35 +170,39 @@ pub fn TypeExpr::head_name(self : TypeExpr) -> String {
 
 ///|
 /// A generic parameter with its trait bounds, e.g. `[T : Compare + Show]`.
+#derive(Debug, Eq)
 pub(all) struct GenericParam {
   name : String
   bounds : Array[QName]
   /// `[T = Int]`.
   default : TypeExpr?
-} derive(Debug, Eq)
+}
 
 ///|
 /// A `#attribute(...)` attached to a declaration. The arguments are kept as
 /// raw text: nothing consuming the AST needs to interpret them yet, but they
 /// must survive so the printer can reproduce the interface.
+#derive(Debug, Eq)
 pub(all) struct Attr {
   name : String
   /// Raw argument text, without the enclosing parentheses.
   args : String
-} derive(Debug, Eq)
+}
 
 ///|
 /// A `pub let` binding.
+#derive(Debug, Eq)
 pub(all) struct ValueDecl {
   name : String
   ty : TypeExpr
   attrs : Array[Attr]
   access : Access
-} derive(Debug, Eq)
+}
 
 ///|
 /// A function declaration. Methods appear as `Type::method` and carry the
 /// receiver in `receiver`.
+#derive(Debug, Eq)
 pub(all) struct FuncDecl {
   name : String
   /// `pub async fn ...` — an asynchronous function.
@@ -204,18 +214,19 @@ pub(all) struct FuncDecl {
   effect : Effect
   attrs : Array[Attr]
   access : Access
-} derive(Debug, Eq)
+}
 
 ///|
 /// `pub const PI : Double = 0x3.243F...` — a compile-time constant. The value
 /// is kept as raw text because it is a literal expression, not a type.
+#derive(Debug, Eq)
 pub(all) struct ConstDecl {
   name : String
   ty : TypeExpr
   value : String
   attrs : Array[Attr]
   access : Access
-} derive(Debug, Eq)
+}
 
 ///|
 /// A struct field or enum constructor field.
@@ -223,6 +234,7 @@ pub(all) struct ConstDecl {
 /// Struct fields written positionally (`struct ArgsLoc(Int)`) have an empty
 /// name. Constructor fields may additionally be labeled (`More(A, tail~ : List[A])`),
 /// which `label` records.
+#derive(Debug, Eq)
 pub(all) struct Field {
   /// Empty for a positional field.
   name : String
@@ -232,9 +244,10 @@ pub(all) struct Field {
   is_mut : Bool
   /// `Some(Optional)` for `x? : T`, `Some(Labeled)` for `x~ : T`.
   label : ParamKind?
-} derive(Debug, Eq)
+}
 
 ///|
+#derive(Debug, Eq)
 pub(all) struct StructDecl {
   name : String
   generics : Array[GenericParam]
@@ -244,17 +257,19 @@ pub(all) struct StructDecl {
   derives : Array[QName]
   attrs : Array[Attr]
   access : Access
-} derive(Debug, Eq)
+}
 
 ///|
 /// One enum constructor. `None`/`Some`-like constructors carry an empty field
 /// list; payloads reuse `Field` so labeled constructor fields survive.
+#derive(Debug, Eq)
 pub(all) struct Ctor {
   name : String
   fields : Array[Field]
-} derive(Debug, Eq)
+}
 
 ///|
+#derive(Debug, Eq)
 pub(all) struct EnumDecl {
   name : String
   generics : Array[GenericParam]
@@ -262,9 +277,10 @@ pub(all) struct EnumDecl {
   derives : Array[QName]
   attrs : Array[Attr]
   access : Access
-} derive(Debug, Eq)
+}
 
 ///|
+#derive(Debug, Eq)
 pub(all) struct TraitDecl {
   name : String
   generics : Array[GenericParam]
@@ -273,29 +289,32 @@ pub(all) struct TraitDecl {
   methods : Array[FuncDecl]
   attrs : Array[Attr]
   access : Access
-} derive(Debug, Eq)
+}
 
 ///|
+#derive(Debug, Eq)
 pub(all) struct ImplDecl {
   trait_name : QName
   trait_args : Array[TypeExpr]
   for_ty : TypeExpr
   attrs : Array[Attr]
-} derive(Debug, Eq)
+}
 
 ///|
 /// `typealias Name = Target`.
+#derive(Debug, Eq)
 pub(all) struct AliasDecl {
   name : String
   generics : Array[GenericParam]
   target : TypeExpr
   access : Access
   attrs : Array[Attr]
-} derive(Debug, Eq)
+}
 
 ///|
 /// An opaque `type Name` declaration: the type exists, its representation does
 /// not.
+#derive(Debug, Eq)
 pub(all) struct OpaqueDecl {
   name : String
   generics : Array[GenericParam]
@@ -303,26 +322,29 @@ pub(all) struct OpaqueDecl {
   derives : Array[QName]
   access : Access
   attrs : Array[Attr]
-} derive(Debug, Eq)
+}
 
 ///|
 /// One entry of a re-export block: `type ArrayView as View` or `trait ToJson`.
+#derive(Debug, Eq)
 pub(all) struct ReexportEntry {
   /// `"type"` or `"trait"`.
   kind : String
   name : String
   /// The `as` alias, when the entry is renamed.
   as_name : String?
-} derive(Debug, Eq)
+}
 
 ///|
 /// `pub using @pkg {type A as B, trait C}` — a re-export from another package.
+#derive(Debug, Eq)
 pub(all) struct ReexportDecl {
   pkg : String
   entries : Array[ReexportEntry]
-} derive(Debug, Eq)
+}
 
 ///|
+#derive(Debug, Eq)
 pub(all) enum Decl {
   Func(FuncDecl)
   Value(ValueDecl)
@@ -336,7 +358,7 @@ pub(all) enum Decl {
   Alias(AliasDecl)
   Opaque(OpaqueDecl)
   Reexport(ReexportDecl)
-} derive(Debug, Eq)
+}
 
 ///|
 /// Stable short name of a declaration kind, used by reports and counters.
@@ -380,11 +402,12 @@ pub fn Decl::declared_name(self : Decl) -> String? {
 
 ///|
 /// One parsed interface file.
+#derive(Debug, Eq)
 pub(all) struct Package {
   name : String
   imports : Array[String]
   decls : Array[Decl]
-} derive(Debug, Eq)
+}
 
 ///|
 /// Number of declarations of the given kind.

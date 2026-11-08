@@ -18,16 +18,18 @@
 ///
 /// A stub is a promise; a module is the thing that keeps it. Both come from the
 /// same walk over the same interface, so their signatures cannot disagree.
+#derive(Debug, Eq)
 pub(all) enum Output {
   /// `.pyi`: signatures only, checked by the type checker.
   Stub
   /// `.py`: the same signatures with a body that calls the guest.
   Bind
-} derive(Debug, Eq)
+}
 
 ///|
 /// Knobs the generator needs; kept in a struct so tests can pin the import
 /// path without touching production text.
+#derive(Debug, Eq)
 pub(all) struct GenOptions {
   /// Module that provides the handle base class.
   runtime_module : String
@@ -35,7 +37,7 @@ pub(all) struct GenOptions {
   base_class : String
   /// Base class of every generated error type.
   error_base : String
-} derive(Debug, Eq)
+}
 
 ///|
 pub fn GenOptions::standard() -> GenOptions {

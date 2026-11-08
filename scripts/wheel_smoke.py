@@ -40,7 +40,6 @@ def main() -> int:
 
     host, runtime = moonbridge.install()
 
-    from moonbridge import moonbitlang__core__builtin as mbuiltin
     from moonbridge import moonbitlang__core__json as mjson
     from moonbridge import gyyyy6__moonbridge__callbacks as mcb
 
@@ -59,15 +58,15 @@ def main() -> int:
     # copies the values it is given, so the handles used to build it are
     # released immediately after — which is also why the final count can be
     # asserted as zero rather than "small".
-    parts = [mbuiltin.Json.number(1.5), mbuiltin.Json.string("x")]
-    array = mbuiltin.Json.array(parts)
+    parts = [mjson.Json.number(1.5), mjson.Json.string("x")]
+    array = mjson.Json.array(parts)
     for part in parts:
         part.close()
     check("list -> Array", array.stringify(), '[1.5,"x"]')
     array.close()
 
-    value = mbuiltin.Json.boolean(True)
-    obj = mbuiltin.Json.object_({"k": value})
+    value = mjson.Json.boolean(True)
+    obj = mjson.Json.object_({"k": value})
     value.close()
     check("dict -> Map", obj.stringify(), '{"k":true}')
     obj.close()

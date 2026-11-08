@@ -13,10 +13,10 @@
 //!    those are recorded as ambiguous and left unresolved rather than guessed.
 //!
 //! 2. **Which package declares a receiver.** A method can be declared in a
-//!    different package from the type it is defined on: `Json::stringify` is
-//!    declared by `moonbitlang/core/json` while `Json` itself lives in
-//!    `moonbitlang/core/builtin`. So methods are indexed by the *receiver's*
-//!    home package, and the stub for that package carries them.
+//!    different package from the type it is defined on (MoonBit allows a
+//!    package to attach methods to a type it does not own). So methods are
+//!    indexed by the *receiver's* home package, and the stub for that package
+//!    carries them.
 //!
 //! The world is a pure data structure: build it once from all parsed packages,
 //! then every mapper is a cheap view onto it.
@@ -28,6 +28,7 @@ pub let builtin_pkg : String = "moonbitlang/core/builtin"
 
 ///|
 /// What the linker knows about one package.
+#derive(Debug)
 pub(all) struct PkgInfo {
   /// Full package path, e.g. `moonbitlang/core/json`.
   name : String
@@ -47,15 +48,20 @@ pub(all) struct PkgInfo {
   /// `@json` -> `moonbitlang/core/json`, from this package's import block.
   /// An empty value marks an alias that two imports claim.
   aliases : Map[String, String]
-} derive(Debug)
+}
 
 ///|
+#derive(Debug)
 pub(all) struct World {
   pkgs : Map[String, PkgInfo]
   /// `<receiver package>::<Type>` -> the methods declared on it, each tagged
   /// with the package that declared it.
   methods : Map[String, Array[(String, @mbti.FuncDecl)]]
-} derive(Debug)
+  /// `<package>::<Type>` for every `pub type X` declaration. A predefined type
+  /// is opaque here, and MoonBit does not allow `Type::Type(...)` constructor
+  /// calls on it; the planner needs to know that before emitting one.
+  predefined : Map[String, Bool]
+}
 
 ///|
 /// The alias a package path is imported under: the last segment, prefixed with
@@ -114,10 +120,16 @@ fn collect_errors(pkg : @mbti.Package) -> Map[String, Bool] {
 
 ///|
 pub fn World::build(pkgs : Array[@mbti.Package]) -> World {
-  let w : World = { pkgs: Map([]), methods: Map([]), }
+  let w : World = { pkgs: Map([]), methods: Map([]), predefined: Map([]), }
   // Pass one: identity and type tables. Every package must be registered
   // before any alias is resolved, because resolution is not order-dependent.
   for pkg in pkgs {
+    for decl in pkg.decls {
+      match decl {
+        @mbti.Opaque(o) => w.predefined.set(pkg.name + "::" + o.name, true)
+        _ => ()
+      }
+    }
     let aliases : Map[String, String] = Map([])
     for path in pkg.imports {
       let at = pkg_alias(path)
@@ -181,6 +193,14 @@ pub fn World::is_suberror(self : World, pkg : String, q : @mbti.QName) -> Bool {
     Some(info) => info.errors.contains(q.name)
     None => false
   }
+}
+
+///|
+/// Whether `name` is declared as `pub type name` (a predefined/opaque type)
+/// in `pkg`. Callers use it to avoid emitting constructor calls that MoonBit
+/// rejects on anything that is not an enum.
+pub fn World::is_predefined(self : World, pkg : String, name : String) -> Bool {
+  self.predefined.get(pkg + "::" + name).unwrap_or(false)
 }
 
 ///|

@@ -801,6 +801,13 @@ fn emit_enc_helper(sb : StringBuilder, w : Wire) -> Unit {
       )
     WArr(inner) | WArrView(inner) => {
       let raises = if encoder_raises(inner) { " raise" } else { "" }
+      // Every encoder takes `T?`. An element of an `Array[T?]` is already an
+      // `Option`, so it passes through unwrapped; every other element needs one
+      // `Some(...)` around it.
+      let elem = match inner {
+        WMaybe(_) => "item"
+        _ => "Some(item)"
+      }
       sb.write_string(
         "///|\nfn enc_" +
         w.key() +
@@ -815,7 +822,9 @@ fn emit_enc_helper(sb : StringBuilder, w : Wire) -> Unit {
         "      for item in items {\n" +
         "        out.push(" +
         enc_name(inner) +
-        "(item))\n" +
+        "(" +
+        elem +
+        "))\n" +
         "      }\n" +
         "      @abi.List(out)\n" +
         "    }\n" +
@@ -827,6 +836,14 @@ fn emit_enc_helper(sb : StringBuilder, w : Wire) -> Unit {
         " raise"
       } else {
         ""
+      }
+      let key_arg = match k {
+        WMaybe(_) => "key"
+        _ => "Some(key)"
+      }
+      let val_arg = match v {
+        WMaybe(_) => "item"
+        _ => "Some(item)"
       }
       sb.write_string(
         "///|\nfn enc_" +
@@ -845,9 +862,13 @@ fn emit_enc_helper(sb : StringBuilder, w : Wire) -> Unit {
         "        let (key, item) = entry\n" +
         "        out.push((" +
         enc_name(k) +
-        "(Some(key)), " +
+        "(" +
+        key_arg +
+        "), " +
         enc_name(v) +
-        "(Some(item))))\n" +
+        "(" +
+        val_arg +
+        ")))\n" +
         "      }\n" +
         "      @abi.Map(out)\n" +
         "    }\n" +

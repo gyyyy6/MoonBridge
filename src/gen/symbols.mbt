@@ -21,6 +21,7 @@
 
 ///|
 /// A concrete type that is addressed by a handle.
+#derive(Debug, Eq)
 pub(all) struct TyRef {
   /// The MoonBit type expression, e.g. `@json.Position`.
   expr : String
@@ -30,7 +31,7 @@ pub(all) struct TyRef {
   /// An identifier-safe spelling, e.g. `json_Position`. Used for the table, its
   /// helpers and the Python class attribute.
   key : String
-} derive(Debug, Eq)
+}
 
 ///|
 /// How one value crosses the boundary.
@@ -38,6 +39,7 @@ pub(all) struct TyRef {
 /// Deliberately small. Each variant is one conversion in the guest's decoder and
 /// one in the Python codec; adding one is a decision about the ABI, not a
 /// convenience for the generator.
+#derive(Debug, Eq)
 pub(all) enum Wire {
   /// `Int` — 32-bit, fixed width.
   WInt
@@ -80,7 +82,7 @@ pub(all) enum Wire {
   /// The parameters and the return are themselves wire shapes, so a callback
   /// that takes an array of handles works the same as one that takes an int.
   WCall(Array[Wire], Wire)
-} derive(Debug, Eq)
+}
 
 ///|
 /// An identifier-safe name for a shape, used to name the decoder and encoder
@@ -140,6 +142,7 @@ fn is_callback_shape(w : Wire) -> Bool {
 
 ///|
 /// What a symbol does, which decides how the guest writes the call.
+#derive(Debug, Eq)
 pub(all) enum SymKind {
   /// A package-level function: `@pkg.name(args)`.
   Free
@@ -152,7 +155,7 @@ pub(all) enum SymKind {
   Getter
   /// A field write: copy, assign, write back.
   Setter
-} derive(Debug, Eq)
+}
 
 ///|
 pub fn SymKind::label(self : SymKind) -> String {
@@ -168,19 +171,19 @@ pub fn SymKind::label(self : SymKind) -> String {
 ///|
 /// One callable the guest can answer, and everything needed to write both
 /// halves from it.
+#derive(Debug)
 pub(all) struct Sym {
   kind : SymKind
   /// The string on the wire, and the only thing the two halves share at
   /// runtime.
   symbol : String
   /// The package that declared it. Not necessarily the receiver's package:
-  /// `Json::stringify` is declared by `json` and attached to `builtin`'s `Json`.
+  /// MoonBit allows one package to attach a method to a type it does not own.
   decl_pkg : String
   /// Raw MoonBit type name of the receiver, empty for a free function.
   owner : String
-  /// The package the receiver's type belongs to, which is where the call has
-  /// to be spelled: `Json::stringify` is a method on `@builtin.Json` even
-  /// though `json` declares it.
+  /// The package the receiver's type belongs to — the alias the guest has to
+  /// spell the call with, which is not always `decl_pkg`.
   owner_pkg : String
   /// Raw name of the function or field.
   name : String
@@ -200,7 +203,7 @@ pub(all) struct Sym {
   /// generic one: `except ParseError` works because the guest names the type it
   /// raised, not because the message was parsed.
   error_type : String
-} derive(Debug)
+}
 
 ///|
 /// A concrete type that needs its own handle table.
@@ -208,12 +211,13 @@ pub(all) struct Sym {
 /// One table per type because MoonBit has no runtime type information: a single
 /// table would have to store a boxed union, and there is no boxed union. The tag
 /// is what lets a release batch name which table an id belongs to.
+#derive(Debug)
 pub(all) struct HandleSlot {
   ty : TyRef
   /// The number the Python wrapper sends back when releasing. Starts at 1 so
   /// that 0 keeps meaning "no object".
   tag : Int32
-} derive(Debug)
+}
 
 ///|
 /// Everything the guest generator and the Python generator need to agree on.
@@ -592,6 +596,24 @@ fn Builder::single_arg(
 }
 
 ///|
+/// `FixedArray` and `ArrayView` are wired as `Array[T]`, which is right for a
+/// value coming *in* (the guest builds the container from a Python list) but
+/// wrong for a value going *out*: the callee hands back a fixed array or a view
+/// and MoonBit will not coerce either into an `Array` at the encoder call. The
+/// declaration is the only place that says which one it is, so refuse the
+/// signature rather than emit a call that does not compile.
+fn has_fixed_or_view(ty : @mbti.TypeExpr) -> Bool {
+  let names : Array[@mbti.QName] = []
+  ty.collect_names(names)
+  for q in names {
+    if q.name == "FixedArray" || q.name == "ArrayView" {
+      return true
+    }
+  }
+  false
+}
+
+///|
 /// The wire shape of a value going out. Same rules plus `Option`, which a
 /// return position can express and the input side never needs.
 fn Builder::wire_out(
@@ -600,6 +622,9 @@ fn Builder::wire_out(
   ty : @mbti.TypeExpr,
   owner : TyRef?,
 ) -> Wire? {
+  if has_fixed_or_view(ty) {
+    return None
+  }
   match ty {
     @mbti.Optional(inner) =>
       match self.wire_out(pkg, inner, owner) {
@@ -638,9 +663,8 @@ fn Builder::wire_out(
 
 ///|
 fn Builder::add(self : Builder, sym : Sym) -> Unit {
-  // The same symbol can be reached from two packages — `Json::stringify` is
-  // declared by `json` and attached to `builtin`'s `Json` — and the guest can
-  // only answer it once.
+  // The same symbol can be reached from two packages when a method is declared
+  // away from the type it is attached to, and the guest can only answer it once.
   let mut seen = false
   let mut i = 0
   while i < self.syms.length() {
@@ -694,6 +718,16 @@ fn Builder::func_decl(self : Builder, pkg : String, f : @mbti.FuncDecl) -> Unit 
       }
     }
     None => ()
+  }
+  // `Byte::Byte(Byte) -> Byte` and its Int64/UInt16/UInt64/Double siblings are
+  // not constructors MoonBit lets us call: those are `pub type X` declarations,
+  // and the compiler rejects `Type::Type(...)` on a predefined type. A struct
+  // or enum constructor with the same shape (`Point::Point`) is perfectly
+  // callable, so the declaration kind is what decides.
+  if owner_raw != "" && f.name == owner_raw {
+    if self.world.is_predefined(owner_pkg, owner_raw) {
+      return self.skip("predefined-ctor")
+    }
   }
   let params : Array[Wire] = []
   let labels : Array[String] = []
