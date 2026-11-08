@@ -83,17 +83,33 @@ MOD
   } >> "$scratch/moon.mod"
 
   echo "deps corpus: resolving $(grep -cvE '^$|^#' "$ROOT/corpus/packages.txt") modules"
+  # A fresh machine (in particular a GitHub runner) has an empty registry
+  # index, so `moon check` reports every pinned module as "not found in the
+  # registry". Refresh the index first; an offline machine can still fall back
+  # to whatever was cached on an earlier run.
+  ( cd "$ROOT" && moon update >/dev/null ) || {
+    echo "deps corpus: moon update failed; using the cached registry index" >&2
+  }
   # Keep stderr visible: when the registry is unreachable or a pinned module no
   # longer resolves, the real reason has to show up in the CI log.
   ( cd "$scratch" && moon check >/dev/null ) || {
     echo "deps corpus: moon check failed; the downloads may be incomplete" >&2
   }
+  local before after added
+  before=$(wc -l < "$out" | tr -d ' ')
   if [ -d "$scratch/.mooncakes" ]; then
     find "$scratch/.mooncakes" -name '*.mbti' -print0 2>/dev/null \
       | while IFS= read -r -d '' f; do to_native "$f"; echo; done >> "$out"
-  else
-    echo "deps corpus: no packages were downloaded; only the core corpus is available" >&2
   fi
+  after=$(wc -l < "$out" | tr -d ' ')
+  added=$((after - before))
+  if [ "$added" -eq 0 ]; then
+    echo "deps corpus: no third-party .mbti files were downloaded" >&2
+    echo "deps corpus: run 'moon update' to refresh the registry index, then retry" >&2
+    echo "deps corpus: refusing to pass with a core-only corpus" >&2
+    return 1
+  fi
+  echo "deps corpus: $added third-party interface files" >&2
 }
 
 mkdir -p "$WORK"
