@@ -14,6 +14,34 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
                                             wasm 模块 / native 库
 ```
 
+## Quick Start
+
+三条命令，从零到调用一个真实的 MoonBit 函数（Python 3.9+，无需了解 wasm、无需配置路径或 C 工具链）：
+
+```bash
+# 1. 安装 wheel（仓库已附带；也可用 bash scripts/wheel.sh 自行重建）
+pip install ./dist/moonbridge-0.1.0-py3-none-any.whl
+
+# 2. import -> install -> 调用 MoonBit 标准库 json 的函数
+python - <<'PY'
+import moonbridge
+moonbridge.install()
+from moonbridge import moonbitlang__core__json as mjson
+print(mjson.valid('{"a": [1, 2, 3]}'))   # True
+PY
+
+# 3. 完整闭环：11 条安装后断言（在仓库外运行可排除误导入本地 _gen/ 的可能）
+python scripts/wheel_smoke.py
+```
+
+`moonbridge.install()` 会加载 wheel 内置的 wasm guest；第 3 步依次验证 JSON 往返、
+对象构造与字段读写、`list` / `dict` / `lambda` 跨边界、类型化异常，以及结束时句柄归零。
+
+![Quick Start 演示：30 秒，真实命令输出逐帧生成（非屏幕录制）](docs/quickstart-demo.gif)
+
+> 动画里的输出取自干净 venv 的真实执行结果，只有 venv 的绝对路径缩写为 `<venv>/...`。
+> 完整可复现链路是 `bash scripts/e2e.sh`，打包细节见 [S6 打包](docs/s6-wheel.md)。
+
 > 状态：**S0 通过、S1 通过、S2 通过、S3 通过、S4 通过、S5 通过、S6 通过**（2026-11-06）。
 > S0：调用 ABI、内存共享、宿主↔MoonBit 字节流、UTF-8 往返全部跑通，实测见
 > [spikes/01-wasm-python](spikes/01-wasm-python/)。
