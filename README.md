@@ -1,5 +1,7 @@
 # MoonBridge
 
+[![mooncakes.io](https://img.shields.io/badge/mooncakes.io-gyyyy6%2Fmoonbridge-blue)](https://mooncakes.io/docs/gyyyy6/moonbridge)
+
 **把 MoonBit 模块变成可 `pip install` 的 Python 包。**
 
 给一个 `moon.mod`，MoonBridge 读取它的公开接口（`moon info` 产物），生成一个真正的 Python
@@ -41,6 +43,18 @@ python scripts/wheel_smoke.py
 
 > 动画里的输出取自干净 venv 的真实执行结果，只有 venv 的绝对路径缩写为 `<venv>/...`。
 > 完整可复现链路是 `bash scripts/e2e.sh`，打包细节见 [S6 打包](docs/s6-wheel.md)。
+
+## 安装
+
+MoonBridge 以两种形态分发：
+
+- **MoonBit 模块**（已发布到 mooncakes.io）：`moon add gyyyy6/moonbridge`
+  包页：<https://mooncakes.io/docs/gyyyy6/moonbridge> ｜ 版本 `0.1.0` ｜ Apache-2.0。
+- **Python wheel**：`pip install ./dist/moonbridge-0.1.0-py3-none-any.whl`（见上方 Quick Start）。
+
+发布实测：`moon publish --dry-run` 返回 `202 Accepted`、`moon publish` 返回 `200 OK`；
+`moon search "gyyyy6/moonbridge"` 可见 `gyyyy6/moonbridge@0.1.0`，
+在一个独立的临时模块中执行 `moon add gyyyy6/moonbridge` 已成功解析到 `@0.1.0`。
 
 > 状态：**S0 通过、S1 通过、S2 通过、S3 通过、S4 通过、S5 通过、S6 通过**（2026-11-06）。
 > S0：调用 ABI、内存共享、宿主↔MoonBit 字节流、UTF-8 往返全部跑通，实测见

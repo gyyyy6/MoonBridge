@@ -217,11 +217,15 @@ bash scripts/wheel.sh
 
 ## 4. 尚未闭合的项
 
-- **mooncakes.io 发布**：`moon login` 需交互式终端、账号凭证由用户持有；本文不声称已经发布，
-  发布成功后再由 README 补徽章与 `moon add gyyyy6/moonbridge` 安装指引。
+- **mooncakes.io 发布：已完成（2026-11-13）**。`moon login` 需交互式终端，由用户在本地终端完成；
+  随后 `moon publish --dry-run` 返回 `202 Accepted`、`moon publish` 返回 `200 OK`，
+  `moon search "gyyyy6/moonbridge"` 与一个独立临时模块里的 `moon add gyyyy6/moonbridge`
+  都确认 `gyyyy6/moonbridge@0.1.0` 可用。README 已补上 mooncakes 徽章与安装指引。
+  这条记录本身也是人机分工的例证：**对外发布需要人的凭证，AI 只能准备、验证与留痕**。
 - **S7**：native（C ABI）后端、CI 平台矩阵、文档站。
 - **Codex 逐文件产出记录**（若确有使用）与 AI 会话记录的仓库内归档。
-- **30 秒演示视频 / GIF**：条件允许时补充；当前仓库提供可复现的终端命令链作为等价演示。
+- **30 秒演示**：已提供 [`docs/quickstart-demo.gif`](quickstart-demo.gif)（30 秒，由干净 venv 的
+  真实命令输出逐帧生成，**非屏幕录制**）；本环境没有可用的屏幕录制工具，若要真正的录屏视频需另补。
 
 ---
 
