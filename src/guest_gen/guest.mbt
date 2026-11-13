@@ -5,11 +5,12 @@
 //! symbol the Python side sends is matched here. Regenerate instead of
 //! editing: a hand edit breaks that guarantee and nothing will say so.
 //!
-//! The ABI is six exports and two buffers:/n//!
+//! The ABI is seven exports and two buffers:/n//!
 //! ```text
 //!   mb_in_reserve(n) -> ptr     grow the input buffer, return its object ptr
 //!   mb_stage() -> ptr           the response buffer's object ptr
 //!   mb_call(in_len) -> out_len  run the frame already in the input buffer
+//!   mb_call_batch(n) -> out_len run N frames in one crossing
 //!   mb_probe() -> ptr           a fingerprinted Bytes, for layout discovery
 //!   mb_probe_out() -> ptr       the same fingerprint as a FixedArray
 //!   mb_live_handles() -> count  objects the tables still hold
@@ -7271,4 +7272,54 @@ pub fn call(in_len : Int32) -> Int32 {
   )
   let payload = slice(buffers.inbox, 4 + sym_len, in_len)
   publish(@abi.encode_status(dispatch(symbol, payload)))
+}
+
+///|
+/// One sub-frame of a batch: `<u32 sym_len> <symbol utf8> <payload>`.
+/// Returning a `Status` rather than publishing it is what lets N sub-calls
+/// share one crossing.
+fn run_one(sub : Bytes) -> @abi.Status {
+  if sub.length() < 4 {
+    return @abi.Failed("batch sub-frame too short")
+  }
+  let sym_len = read_u32(sub, 0)
+  if sym_len < 0 || 4 + sym_len > sub.length() {
+    return @abi.Failed("symbol overruns the frame")
+  }
+  let symbol = @utf8.decode_lossy(slice(sub, 4, 4 + sym_len).exact_view())
+  let payload = slice(sub, 4 + sym_len, sub.length())
+  dispatch(symbol, payload)
+}
+
+///|
+/// A malformed request still owes the host a well-formed container: the
+/// host decodes the batch before it can report anything at all.
+fn batch_error(message : String) -> Bytes {
+  @abi.encode_batch([@abi.encode_status(@abi.Failed(message))])
+}
+
+///|
+/// Runs N frames in one host crossing.
+///
+/// Answers are collected in a local array and published once. Publishing
+/// per sub-call would overwrite the shared response buffer, which a
+/// callback raised inside a sub-call also uses to hand arguments over.
+#export_name("mb_call_batch")
+pub fn call_batch(in_len : Int32) -> Int32 {
+  if in_len < 4 || in_len > buffers.inbox.length() {
+    return publish(batch_error("bad batch frame length"))
+  }
+  let decoded = Some(@abi.decode_batch(slice(buffers.inbox, 0, in_len))) catch {
+    _ => None
+  }
+  match decoded {
+    None => publish(batch_error("malformed batch frame"))
+    Some(frames) => {
+      let answers : Array[Bytes] = []
+      for sub in frames {
+        answers.push(@abi.encode_status(run_one(sub)))
+      }
+      publish(@abi.encode_batch(answers))
+    }
+  }
 }

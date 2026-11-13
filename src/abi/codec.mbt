@@ -316,6 +316,65 @@ pub fn encode_status(status : Status) -> Bytes {
 }
 
 ///|
+/// Four little-endian bytes: the length prefix a batch frame uses. Lengths are
+/// non-negative, so no sign extension is involved.
+fn write_u32(buf : @buffer.Buffer, value : Int32) -> Unit {
+  for shift = 0; shift < 4; shift = shift + 1 {
+    buf.write_byte(((value >> (shift * 8)) & 0xFF).to_byte())
+  }
+}
+
+///|
+fn Cursor::u32(self : Cursor) -> Int32 raise DecodeError {
+  let mut v = 0
+  for shift = 0; shift < 4; shift = shift + 1 {
+    v = v | (self.byte() << (shift * 8))
+  }
+  v
+}
+
+///|
+/// Packs already-encoded frames into one container. The host uses it for the N
+/// calls it wants to make and the guest uses it for the N status frames it
+/// produced, so one format serves both directions:
+///
+/// ```text
+///   <u32 count> (<u32 len> <frame bytes>)*
+/// ```
+///
+/// Keeping the framing here rather than in the generated guest means the
+/// golden vectors below are the same bytes both halves exchange.
+pub fn encode_batch(frames : Array[Bytes]) -> Bytes {
+  let buf = @buffer.Buffer()
+  write_u32(buf, frames.length())
+  for frame in frames {
+    write_u32(buf, frame.length())
+    buf.write_bytes(frame)
+  }
+  buf.to_bytes()
+}
+
+///|
+/// Unpacks a batch container. A truncated length or a frame that runs past the
+/// end is an error rather than a short read: slicing into the next frame's
+/// bytes would turn one bad frame into two wrong answers.
+pub fn decode_batch(data : Bytes) -> Array[Bytes] raise DecodeError {
+  let cursor = Cursor::new(data)
+  let count = cursor.u32()
+  if count < 0 || count > 1000000 {
+    raise DecodeError("batch count out of range")
+  }
+  let frames : Array[Bytes] = []
+  for i = 0; i < count; i = i + 1 {
+    frames.push(cursor.take(cursor.u32()))
+  }
+  if cursor.pos != data.length() {
+    raise DecodeError("trailing bytes after batch")
+  }
+  frames
+}
+
+///|
 /// Reads a failure payload, which is either a bare message or a map naming the
 /// type. The bare form is what an older guest sends, and accepting both costs
 /// one `match`.

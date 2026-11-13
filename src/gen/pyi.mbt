@@ -483,6 +483,9 @@ fn body_of(doc : String, members : Array[String]) -> String {
 priv struct Sig {
   text : String
   names : Array[String]
+  /// Parameter types in declaration order, kept so a batch companion can
+  /// spell `tuple[T0, T1, ...]` without parsing `text` back apart.
+  types : Array[@map.PyType]
   /// The return type as it was actually written, after a type variable that
   /// could not be inferred was degraded. The body has to agree with the
   /// signature, not with what the interface wanted.
@@ -591,7 +594,7 @@ fn Emitter::signature(
     sb.write_string(", " + join(kw, ", "))
   }
   sb.write_string(") -> " + ret_ty.render())
-  { text: sb.to_string(), names: all_names, ret: ret_ty, }
+  { text: sb.to_string(), names: all_names, types, ret: ret_ty, }
 }
 
 ///|
@@ -672,6 +675,103 @@ fn Emitter::finish(
 }
 
 ///|
+/// A function value cannot be encoded by the Python codec: `finish` interns
+/// it through `callback_id` first. A batch has nowhere to do that per tuple,
+/// so such functions keep the single-call API only.
+fn wire_has_call(w : Wire) -> Bool {
+  match w {
+    WCall(_, _) => true
+    WMaybe(inner) | WArr(inner) | WArrView(inner) => wire_has_call(inner)
+    WMap(k, v) => wire_has_call(k) || wire_has_call(v)
+    WRes(ok, err) => wire_has_call(ok) || wire_has_call(err)
+    _ => false
+  }
+}
+
+///|
+fn Emitter::batchable(self : Emitter, symbol : String) -> Bool {
+  match self.plan {
+    None => false
+    Some(p) =>
+      match p.lookup(symbol) {
+        Some(s) => {
+          for w in s.params {
+            if wire_has_call(w) {
+              return false
+            }
+          }
+          true
+        }
+        None => false
+      }
+  }
+}
+
+///|
+/// Only positional parameters have an unambiguous place in an argument tuple;
+/// a labelled or optional one would make the companion disagree with the
+/// signature the stub declares.
+fn all_positional(params : Array[@mbti.Param]) -> Bool {
+  for p in params {
+    match p.kind {
+      @mbti.Positional => ()
+      _ => return false
+    }
+  }
+  true
+}
+
+///|
+/// Renders `<name>_many`: one crossing for N calls, one typed result per call.
+/// ADR 0001 promised this variant for every batchable API; it is emitted from
+/// the same `Sig` as the single-call function, so the two cannot drift.
+fn Emitter::render_many(
+  self : Emitter,
+  name : String,
+  symbol : String,
+  types : Array[@map.PyType],
+  ret : @map.PyType,
+) -> String {
+  self.typing_used.set("Sequence", true)
+  self.typing_used.set("cast", true)
+  let parts : Array[String] = []
+  for ty in types {
+    parts.push(ty.render())
+  }
+  let tuple_ty = "tuple[" + join(parts, ", ") + "]"
+  let list_ty = "list[" + ret.render() + "]"
+  let mut prelude = ""
+  let wrap = match ret {
+    @map.PyHandle(cls, _) => {
+      match sibling_import(cls) {
+        Some(line) => prelude = "    " + line + "\n"
+        None => ()
+      }
+      "lambda h: _runtime.wrap(" + cls + ", h)"
+    }
+    _ => "None"
+  }
+  "def " +
+  name +
+  "_many(calls: Sequence[" +
+  tuple_ty +
+  "]) -> " +
+  list_ty +
+  ":\n" +
+  "    \"\"\"Calls `" +
+  name +
+  "` once per tuple in one crossing.\"\"\"\n" +
+  prelude +
+  "    return cast(" +
+  list_ty +
+  ", _runtime.default().request_many(\"" +
+  symbol +
+  "\", calls, " +
+  wrap +
+  "))"
+}
+
+///|
 fn Emitter::render_func(
   self : Emitter,
   f : @mbti.FuncDecl,
@@ -736,7 +836,21 @@ fn Emitter::render_func(
       }
       if self.claim(name) {
         let sig = self.signature(name, false, scoped, f.generics, f.params, ret)
-        Some(self.finish(sig, symbol, "    "))
+        let single = self.finish(sig, symbol, "    ")
+        // A batch companion is only meaningful for a bound module, needs at
+        // least one argument tuple to be worth a crossing, and must agree
+        // with what the planner actually put behind the symbol.
+        if self.output == Bind &&
+          sig.types.length() > 0 &&
+          all_positional(f.params) &&
+          self.batchable(symbol) &&
+          self.claim(name + "_many") {
+          Some(
+            single + "\n\n" + self.render_many(name, symbol, sig.types, sig.ret),
+          )
+        } else {
+          Some(single)
+        }
       } else {
         None
       }
@@ -875,6 +989,7 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
               {
                 text: "def " + field_names[i] + "(self) -> " + ty.render(),
                 names: ["self"],
+                types: [],
                 ret: ty,
               },
               getter,
@@ -897,6 +1012,7 @@ fn Emitter::render_struct(self : Emitter, s : @mbti.StructDecl) -> String? {
                   ty.render() +
                   ") -> None",
                   names: ["self", "value"],
+                  types: [],
                   ret: @map.PyNone,
                 },
                 setter,

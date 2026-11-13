@@ -81,9 +81,12 @@ MoonBridge 以两种形态分发：
 > S5：`Array` / `Map` / `Option` / `Result` / 回调 / 异常字段全部可跨边界——Python 的 `list`、
 > `dict`、`lambda` 直接传，MoonBit 的 `suberror` 变成 Python 的 `except` 类，
 > 见 [S5 容器与回调](docs/s5-containers-and-callbacks.md)。
-> S6：**打成真正的 wheel**——501 KB，508 个条目，`requires = []` 的自写 PEP 517 后端，
+> S6：**打成真正的 wheel**——607 KB，567 个条目，`requires = []` 的自写 PEP 517 后端，
 > 可复现构建；`pip install` 之后 `import moonbridge; moonbridge.install()` 即可用，
 > 见 [S6 打包](docs/s6-wheel.md)。
+> **批量协议（2026-11-13）**：`mb_call_batch` 一次跨越跑 N 帧，10 万次 `valid()`
+> 从 **40.34 μs/次降到 6.87 μs/次（5.87×）**，跨越次数 100,000 → 391，
+> 171/171 测试与 10 万次 0 泄漏不回退，见 [批量协议报告](docs/batching.md)。
 
 > **开发复盘与「AI 可解释」证据索引**：[docs/development-retrospective.md](docs/development-retrospective.md) —
 > 关键架构决策（wasm 优先、Plan 模型）、AI 工具在开发流程中的角色，以及
@@ -130,7 +133,9 @@ MoonBridge 补的是这一层：**不是给某个库手写一层包装，而是�
 
 最后一行决定了架构：**瓶颈在 Python 绑定层，不在 MoonBit**。因此高频路径必须走
 "批量调用 + 缓冲协议"（一次跨越处理 N 个元素），并且 native(C ABI) 后端要作为性能选项保留。
-详见 [ADR 0001](docs/decisions/0001-wasm-first.md)。
+**该批量协议已于 2026-11-13 实现并验证**：10 万次 `valid()` 从 40.34 μs/次降到
+6.87 μs/次（**5.87×**），跨越次数 100,000 → 391，详见 [批量协议报告](docs/batching.md)。
+决策依据见 [ADR 0001](docs/decisions/0001-wasm-first.md)。
 
 ---
 
@@ -295,12 +300,12 @@ python -c "import moonbridge; moonbridge.install()"
 ```
 
 构建系统是自己写的 128 行 PEP 517 后端，`requires = []`——用户不必为了装这个包先装
-setuptools，断网也能构建。wheel 里是可移植的 wasm 与 494 个 `.pyi`，`Tag: py3-none-any`
+setuptools，断网也能构建。wheel 里是可移植的 wasm 与 553 个 `.pyi`，`Tag: py3-none-any`
 由 `Requires-Dist: wasmtime>=20` 兜住平台差异。
 
 | | S5 | S6 |
 |---|---|---|
-| 分发形态 | `_gen/` 一个目录 | **`moonbridge-0.1.0-py3-none-any.whl`**（501 KB / 508 条目） |
+| 分发形态 | `_gen/` 一个目录 | **`moonbridge-0.1.0-py3-none-any.whl`**（607 KB / 567 条目） |
 | 构建依赖 | — | **0**（标准库） |
 | 构建可复现 | — | 两次构建 sha256 相同，且与 pip 驱动后端的结果相同 |
 | 安装后的初始化 | 传 wasm 路径 | `moonbridge.install()` |
@@ -308,6 +313,56 @@ setuptools，断网也能构建。wheel 里是可移植的 wasm 与 494 个 `.py
 
 打包脚本最小心的地方是**从仓库外跑冒烟测试**：在仓库根目录 `import moonbridge` 会找到
 `_gen/`，wheel 少一个文件也照样"通过"。细节见 [S6 打包](docs/s6-wheel.md)。
+
+## 批量协议（Batching）：一次跨越处理 N 次调用
+
+S0 测出单次往返 6.9–22.7 μs，[ADR 0001](docs/decisions/0001-wasm-first.md) 因此要求
+"hot path 一律批量"，但当时只写了计划。这一段把它兑现：新增一个 wasm 导出
+`mb_call_batch`，把 N 帧打包进**一次**宿主跨越——N 次调用摊薄成一次 wasm 调用、
+一次内存写、一次内存读。
+
+```text
+旧：for x in xs: mjson.valid(x)    →  N × (encode + wasm call + read + decode)
+新：mjson.valid_many([(x,) ...])   →  1 × (encode N + wasm call + read + decode N)
+```
+
+生成器为每个**可批量**的函数自动产出 `<fn>_many`（可批量 = 全位置参数、且参数里没有函数值；
+labelled / optional 参数或回调在元组里没有无歧义的位置，仍走单次调用）。
+低层入口是 `moonbridge.run_batch(symbol, calls, wrap=...)`，供自定义批量使用。
+
+```python
+import moonbridge
+from moonbridge import moonbitlang__core__json as mjson
+
+moonbridge.install()
+mjson.valid_many([('{"a": 1}',), ("{oops",), ("[]",)])   # [True, False, True]
+```
+
+### 10 万次实测（Windows 11 / Python 3.13 / wasmtime 50.0.1，batch size 256）
+
+| 模式 | 总耗时 | 每次调用 | 宿主跨越次数 |
+| --- | --- | --- | --- |
+| 循环单次调用 `valid()` × 100,000 | 4.034 s | **40.34 μs** | 100,000 |
+| `valid_many` 批量 × 100,000 | 0.687 s | **6.87 μs** | **391** |
+| **加速比** | | **5.87×** | **256× 更少的跨越** |
+
+同一测量重跑 3 次：5.87× / 5.89× / 5.97×（中位数 **5.89×**）。6.87 μs 已落到 S0 的
+纯 wasm `nop` 基线（6.9 μs）附近——剩下基本是 MoonBit 自己执行 `valid` 的成本，
+绑定层被摊薄到接近零。
+
+### 不变量没有被牺牲
+
+- `moon test --deny-warn` **171/171**（wasm + js 双目标）、`moon fmt --check`、
+  `mypy --strict`（561 个生成 stub，0 报错）、`reuse lint` 77/77 全绿。
+- 原有 6 个 10 万次用例的句柄与内存曲线逐字节不变：`live=0`、`dropped=0`、
+  guest 内存平直（192 / 384 KiB）。
+- 批量路径额外断言：返回句柄的批量调用全部 `close()` 后 `live=0`；**在一批中间插入一个
+  `ParseError`** 仍能抛出类型化异常且 `live=0`。guest 会把整批跑完，失败帧之后的成功帧
+  也会造句柄，所以 fail-fast 必须先给所有成功帧建立 Python 所有者再统一释放——这个坑是
+  实测抓到的，已固化成基准断言。
+
+三方向的评估依据、字节级帧格式、生成规则与已知边界见
+**[批量协议报告](docs/batching.md)**；决策依据见 [ADR 0001](docs/decisions/0001-wasm-first.md)。
 
 ## 开发
 
@@ -324,7 +379,7 @@ bash scripts/corpus.sh all
 # 生成 Python stub 并跑 mypy strict
 bash scripts/gen.sh all
 
-# 生成 + 端到端 + 基准（需要 python + wasmtime）
+# 生成 + 端到端 + 10 万次基准（含单次 vs 批量对比；需要 python + wasmtime）
 bash scripts/e2e.sh
 BENCH_CALLS=20000 bash scripts/e2e.sh   # 快速跑一遍
 
@@ -359,7 +414,10 @@ python bridge_test.py
       `suberror` 变成 Python 异常类（见 [报告](docs/s5-containers-and-callbacks.md)）
 - [x] **S6** PEP 517 打包与真实包端到端：自写构建后端（零依赖、可复现），
       `pip install` 后 `import moonbridge` 即可用（见 [报告](docs/s6-wheel.md)）
-- [ ] **S7** native(C ABI) 后端、CI 矩阵、文档站
+- [x] **批量协议（Batching）**：`mb_call_batch` + 自动生成的 `*_many` + `run_batch`；
+      10 万次 `valid()` **5.87× 加速**（40.34 → 6.87 μs/次），0 泄漏
+      （见 [报告](docs/batching.md)；兑现 ADR 0001 第 2 条）
+- [ ] **S7** native(C ABI) 后端、文档站（CI 双目标矩阵与 REUSE 合规已在 S6 后补齐）
 
 ---
 

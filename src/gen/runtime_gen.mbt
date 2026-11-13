@@ -257,6 +257,41 @@ pub fn render_codec() -> String {
     #|    value = reader.value()
     #|    return status, value
     #|
+    #|
+    #|def dump_batch(items: Sequence[bytes]) -> bytes:
+    #|    """Packs N already-encoded frames into one crossing.
+    #|
+    #|    The container is `<u32 count> (<u32 len> <frame>)*`, byte for byte
+    #|    the one `src/abi/codec.mbt` pins with golden vectors. The host uses
+    #|    it for the request and the guest uses it for the response.
+    #|    """
+    #|    out = bytearray(struct.pack("<I", len(items)))
+    #|    for item in items:
+    #|        out += struct.pack("<I", len(item))
+    #|        out += item
+    #|    return bytes(out)
+    #|
+    #|
+    #|def load_batch(data: bytes) -> list[bytes]:
+    #|    """Splits a batch container back into its frames."""
+    #|    if len(data) < 4:
+    #|        raise DecodeError("truncated batch")
+    #|    count = int(struct.unpack_from("<I", data, 0)[0])
+    #|    frames: list[bytes] = []
+    #|    pos = 4
+    #|    for _ in range(count):
+    #|        if pos + 4 > len(data):
+    #|            raise DecodeError("truncated batch length")
+    #|        size = int(struct.unpack_from("<I", data, pos)[0])
+    #|        pos += 4
+    #|        if pos + size > len(data):
+    #|            raise DecodeError("truncated batch frame")
+    #|        frames.append(data[pos : pos + size])
+    #|        pos += size
+    #|    if pos != len(data):
+    #|        raise DecodeError("trailing bytes after batch")
+    #|    return frames
+    #|
   text
 }
 
@@ -277,7 +312,7 @@ pub fn render_runtime() -> String {
     #|from __future__ import annotations
     #|
     #|import weakref
-    #|from typing import Any, Callable, Final, TypeVar
+    #|from typing import Any, Callable, Final, Sequence, TypeVar
     #|
     #|from . import _codec
     #|
@@ -356,6 +391,20 @@ pub fn render_runtime() -> String {
     #|                return cls(message)
     #|            return MoonError(message)
     #|    return MoonError(str(value))
+    #|
+    #|
+    #|def _release_partial(values: list[Any]) -> None:
+    #|    """Closes handles a failed batch already produced.
+    #|
+    #|    A batch is fail fast: sub-calls before the failing one already ran in
+    #|    the guest, so any handle among their results needs its owner closed
+    #|    before the exception leaves. Without this, a typed error in the
+    #|    middle of a batch of object-returning calls would leak.
+    #|    """
+    #|    for value in values:
+    #|        close = getattr(value, "close", None)
+    #|        if callable(close):
+    #|            close()
     #|
     #|
     #|class MoonObject:
@@ -453,14 +502,22 @@ pub fn render_runtime() -> String {
     #|        self,
     #|        call: Callable[[str, bytes], bytes],
     #|        *,
+    #|        call_batch: Callable[[Sequence[tuple[str, bytes]]], list[bytes]] | None = None,
     #|        release_batch: int = RELEASE_BATCH,
     #|    ) -> None:
     #|        self._call = call
+    #|        # Optional so a host without `mb_call_batch` (an older guest, or a
+    #|        # test double) still supports the batch API by falling back to N
+    #|        # single calls instead of failing at import time.
+    #|        self._call_batch = call_batch
     #|        self._pending: list[list[int]] = []
     #|        self._release_batch = release_batch
     #|        self._closed = False
-    #|        #: Frames sent, for a caller that wants to see the boundary's cost.
+    #|        #: Logical calls made, for a caller that wants to see the workload.
     #|        self.calls = 0
+    #|        #: Actual host crossings. A batch of N calls adds N to `calls` but
+    #|        #: only 1 here; the gap between the two is the whole point.
+    #|        self.crossings = 0
     #|        #: Python callables the guest can call back into, by id.
     #|        #:
     #|        #: A MoonBit function value cannot travel: the guest holds an `Int32`
@@ -481,6 +538,7 @@ pub fn render_runtime() -> String {
     #|    def request(self, symbol: str, args: list[object]) -> Any:
     #|        """Sends one call and returns its decoded payload."""
     #|        self.calls += 1
+    #|        self.crossings += 1
     #|        response = self._call(symbol, _codec.dump_args(args))
     #|        status, value = _codec.load_status(response)
     #|        if status == _codec.STATUS_OK:
@@ -488,6 +546,58 @@ pub fn render_runtime() -> String {
     #|        if status == _codec.STATUS_FAILED:
     #|            raise failure(value)
     #|        raise MoonPanic(str(value))
+    #|
+    #|    def request_many(
+    #|        self,
+    #|        symbol: str,
+    #|        args_list: Sequence[Sequence[object]],
+    #|        wrap: Callable[[Any], Any] | None = None,
+    #|    ) -> list[Any]:
+    #|        """Sends N calls to one symbol in a single boundary crossing.
+    #|
+    #|        `wrap` turns a raw handle into its generated `MoonObject` subclass,
+    #|        so a batched call observes exactly the ownership rules a single
+    #|        call does. A transport without a batch export degrades to N single
+    #|        calls rather than failing: the API stays portable across hosts.
+    #|
+    #|        Every sub-call runs in the guest even if an earlier one failed,
+    #|        so all successful frames are decoded and wrapped before the
+    #|        first error is raised. `_release_partial` then closes every
+    #|        handle the batch produced, including ones *after* the failure —
+    #|        otherwise fail fast would leak exactly those.
+    #|        """
+    #|        if not args_list:
+    #|            return []
+    #|        self.calls += len(args_list)
+    #|        if self._call_batch is None:
+    #|            self.crossings += len(args_list)
+    #|            responses = [
+    #|                self._call(symbol, _codec.dump_args(list(args)))
+    #|                for args in args_list
+    #|            ]
+    #|        else:
+    #|            self.crossings += 1
+    #|            responses = self._call_batch(
+    #|                [
+    #|                    (symbol, _codec.dump_args(list(args)))
+    #|                    for args in args_list
+    #|                ]
+    #|            )
+    #|        values: list[Any] = []
+    #|        error: MoonError | None = None
+    #|        for response in responses:
+    #|            status, value = _codec.load_status(response)
+    #|            if status == _codec.STATUS_OK:
+    #|                values.append(value if wrap is None else wrap(value))
+    #|            elif error is None:
+    #|                if status == _codec.STATUS_FAILED:
+    #|                    error = failure(value)
+    #|                else:
+    #|                    error = MoonPanic(str(value))
+    #|        if error is not None:
+    #|            _release_partial(values)
+    #|            raise error
+    #|        return values
     #|
     #|    def callback_id(self, fn: Callable[..., Any]) -> int:
     #|        """Interns a Python callable and returns the id the guest will hold.
@@ -607,7 +717,7 @@ pub fn render_host() -> String {
     #|
     #|import struct
     #|from pathlib import Path
-    #|from typing import Any
+    #|from typing import Any, Sequence
     #|
     #|import wasmtime
     #|
@@ -662,6 +772,13 @@ pub fn render_host() -> String {
     #|        self._in_reserve: Any = exports["mb_in_reserve"]
     #|        self._stage: Any = exports["mb_stage"]
     #|        self._call: Any = exports["mb_call"]
+    #|        # A guest built before the batch protocol has no such export.
+    #|        # `call_batch` then falls back to N single calls, so an old
+    #|        # wheel and a new binding still agree on the API.
+    #|        try:
+    #|            self._batch: Any = exports["mb_call_batch"]
+    #|        except KeyError:
+    #|            self._batch = None
     #|        self._live: Any = exports["mb_live_handles"]
     #|        self._probe: Any = exports["mb_probe"]
     #|        self._probe_out: Any = exports["mb_probe_out"]
@@ -732,6 +849,34 @@ pub fn render_host() -> String {
     #|        base = self._out_ptr + self._out_offset
     #|        return bytes(self._memory.read(self._store, base, base + length))
     #|
+    #|    def call_batch(self, items: Sequence[tuple[str, bytes]]) -> list[bytes]:
+    #|        """Sends N frames in one crossing and returns N status frames.
+    #|
+    #|        One memory write, one wasm call, one memory read. Every sub-frame
+    #|        has the layout `call` uses, so the guest runs them through the
+    #|        same dispatcher and no second protocol has to stay in sync.
+    #|        """
+    #|        if self._batch is None:
+    #|            return [self.call(symbol, payload) for symbol, payload in items]
+    #|        frames: list[bytes] = []
+    #|        for symbol, payload in items:
+    #|            name = symbol.encode("utf-8")
+    #|            frames.append(struct.pack("<I", len(name)) + name + payload)
+    #|        request = _codec.dump_batch(frames)
+    #|        self._ensure_input(len(request))
+    #|        self._memory.write(self._store, request, self._in_ptr + self._in_offset)
+    #|        length = int(self._batch(self._store, len(request)))
+    #|        # A callback that raised could not unwind through the guest; it is
+    #|        # re-raised here, once the whole batch has returned.
+    #|        if self._callback_error is not None:
+    #|            error = self._callback_error
+    #|            self._callback_error = None
+    #|            raise error
+    #|        self._ensure_output(length)
+    #|        base = self._out_ptr + self._out_offset
+    #|        data = bytes(self._memory.read(self._store, base, base + length))
+    #|        return _codec.load_batch(data)
+    #|
     #|    def _invoke_callback(self, cb_id: int, sent: int) -> int:
     #|        """The host half of the callback channel.
     #|
@@ -783,7 +928,7 @@ pub fn render_host() -> String {
     #|def open_runtime(wasm: str | Path) -> tuple[WasmHost, _runtime.Runtime]:
     #|    """Loads a guest and returns it with a runtime pointed at it."""
     #|    host = WasmHost(wasm)
-    #|    runtime = _runtime.Runtime(host.call)
+    #|    runtime = _runtime.Runtime(host.call, call_batch=host.call_batch)
     #|    host.attach(runtime)
     #|    return host, runtime
     #|
@@ -801,6 +946,7 @@ pub fn render_init() -> String {
   "from __future__ import annotations\n" +
   "\n" +
   "from pathlib import Path\n" +
+  "from typing import Any, Callable, Sequence\n" +
   "\n" +
   "from ._runtime import (\n" +
   "    MoonError,\n" +
@@ -821,6 +967,7 @@ pub fn render_init() -> String {
   "    \"default\",\n" +
   "    \"install\",\n" +
   "    \"open_guest\",\n" +
+  "    \"run_batch\",\n" +
   "    \"set_default\",\n" +
   "]\n" +
   "\n" +
@@ -854,5 +1001,22 @@ pub fn render_init() -> String {
   "    \"\"\"\n" +
   "    host, runtime = open_guest(wasm)\n" +
   "    set_default(runtime)\n" +
-  "    return host, runtime\n"
+  "    return host, runtime\n" +
+  "\n" +
+  "\n" +
+  "def run_batch(\n" +
+  "    symbol: str,\n" +
+  "    calls: Sequence[Sequence[object]],\n" +
+  "    *,\n" +
+  "    wrap: Callable[[Any], Any] | None = None,\n" +
+  ") -> list[Any]:\n" +
+  "    \"\"\"Runs N calls to one MoonBit symbol in a single boundary crossing.\n" +
+  "\n" +
+  "    This is the low-level form. Generated modules wrap it as ``<fn>_many``\n" +
+  "    so a caller gets typed results and automatic handle ownership; use that\n" +
+  "    when the function returns a MoonBit object. `wrap` is the adapter those\n" +
+  "    companions pass, and `symbol` is the qualified MoonBit name the module\n" +
+  "    sends (``<package>::<function>``).\n" +
+  "    \"\"\"\n" +
+  "    return default().request_many(symbol, calls, wrap)\n"
 }

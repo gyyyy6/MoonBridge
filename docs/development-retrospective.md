@@ -91,6 +91,26 @@ Plan 让不一致在结构上不可能发生，而不是事后检查。[S4 报�
 | 自写零构建依赖 PEP 517 后端（`requires = []`） | 断网也能构建、两次构建 sha256 一致，用户不必先装 setuptools | 运行时仍需 `wasmtime>=20`；冒烟测试必须从仓库外跑，否则会误导入 `_gen/` | [`pack/`](../pack/)、[S6 报告](s6-wheel.md)、[`scripts/wheel_smoke.py`](../scripts/wheel_smoke.py) |
 | 语料钉版本、只取发布的 `.mbti` | 第三方接口是外部产物，靠「最新」无法复现；`mooncakes` 包自带 `pkg.generated.mbti`，正是生成器真实会拿到的输入 | 工具链升级后语料从 501 扩到 561，数字必须按快照日期分开记 | [`corpus/packages.txt`](../corpus/packages.txt)、[`scripts/corpus.sh`](../scripts/corpus.sh)、[申报书「复现更新」](../项目申报书.md) |
 | 把「泄漏」写成断言而不是报告 | 四个 bug 都不报错，只让内存缓慢上涨 | `dropped` 计数是唯一能区分「释放了」和「以为释放了」的数字 | [`bench/`](../bench/)、[`scripts/e2e.sh`](../scripts/e2e.sh)、S3/S4 报告 |
+| 批量协议做成「加一个导出」而不是「改一套协议」 | ADR 0001 早已承诺 hot path 批量；`dispatch(symbol, payload) -> Status` 本来就是纯函数，N 次复用即可 | 批内失败会让**失败帧之后**的成功帧造出无人认领的句柄；guest 跑完整批，fail-fast 必须先包装全部成功帧再统一释放 | [`src/abi/codec.mbt`](../src/abi/codec.mbt)、[`src/gen/guest_gen.mbt`](../src/gen/guest_gen.mbt)、[批量协议报告](batching.md) |
+
+### 1.4 为什么三个优化方向里选了批量协议（2026-11-13）
+
+终期冲刺给了三个候选，**先算账再动手**，评估数据全部留在 [批量协议报告](batching.md) 第 1 节：
+
+- **单态化**：`gen.sh all` 的降级构成里，泛型 / 返回位类型变量只占 66 处（约 1%）；
+  大头是跨包 stub 互不 import（类型图含 50 个环文件）这一**架构取舍**，不是泛型。
+  且 S5 之后运行时已按 `WArr` / `WMap` / `WRes` 具体形状生成解码器，改 stub 注解不会改变运行时行为。
+  收益小、要动环检测，否决。
+- **增量缓存**：`gen.sh all` 全程 40.6 s，其中 `corpus.sh all` 约 37 s、`mypy` 约 2 s，
+  `CLI --gen` 热跑只有 1.3 s —— 缓存能省的上限约 **3%**；而 `World` 由全部 package 构建
+  （330 模块 / 648 导入边），单文件哈希跳过需要额外维护依赖图才正确。收益/风险比不划算，否决。
+- **批量协议**：直接命中 S0 已测出的 6.9–22.7 μs/次瓶颈，兑现 ADR 0001 第 2 条，
+  改动是加性的（新导出 + 新帧容器），不碰已有帧语义，且可用 10 万次对比证伪。选中。
+
+实测 10 万次 `valid()` **40.34 → 6.87 μs/次（5.87×）**、跨越 100,000 → 391；
+6.87 μs 与 S0 的纯 wasm `nop` 基线 6.9 μs 重合，反过来**验证了 ADR 0001 的判断**。
+这次选择本身就是「可解释」的样例：不是挑最好听的方向，而是把每个方向的收益上限和风险
+都量出来，再把计算过程写进仓库。
 
 ---
 
@@ -174,6 +194,9 @@ Plan 让不一致在结构上不可能发生，而不是事后检查。[S4 报�
 | 为什么有 Plan | [S4 报告](s4-object-model.md) + [`src/gen/symbols.mbt`](../src/gen/symbols.mbt) | `bash scripts/e2e.sh` |
 | 句柄为什么带世代 | [`src/abi/handle.mbt`](../src/abi/handle.mbt) + [S3 报告](s3-runtime.md) | `moon test --target wasm --deny-warn` |
 | 为什么会有 `Any` | [S2 报告](s2-type-mapping.md) + [`src/map/type_map.mbt`](../src/map/type_map.mbt) | `bash scripts/gen.sh all` |
+| 为什么做批量、为什么不做单态化 / 增量缓存 | [批量协议报告](batching.md) 第 1 节 + 本文 1.4 + [ADR 0001](decisions/0001-wasm-first.md) | `bash scripts/e2e.sh`（基准含 10 万次单次 vs 批量对比） |
+| 批量帧的字节布局是否被钉住 | [`src/abi/codec.mbt`](../src/abi/codec.mbt) + [`src/abi/codec_test.mbt`](../src/abi/codec_test.mbt) | `moon test --target wasm --deny-warn`（171/171） |
+| 批量路径为什么不泄漏 | [`src/gen/runtime_gen.mbt`](../src/gen/runtime_gen.mbt) 的 `request_many` / `_release_partial` | `python bench/bench.py --package _gen --wasm _build/wasm/release/build/guest_gen/guest_gen.wasm` |
 | 回调为什么不另起线程 | [S5 报告](s5-containers-and-callbacks.md) | `bash scripts/e2e.sh` |
 | wheel 为什么零构建依赖 | [S6 报告](s6-wheel.md) + [`pack/moonbridge_build.py`](../pack/moonbridge_build.py) | `bash scripts/wheel.sh` |
 | 数字是否可信 | [申报书「复现更新」](../项目申报书.md) + `docs/s*.md` 各阶段快照 | `bash scripts/corpus.sh all` / `bash scripts/e2e.sh` |
@@ -188,11 +211,11 @@ moon version --all
 moon fmt --check
 moon check --target wasm --deny-warn
 moon check --target js   --deny-warn
-moon test  --target wasm --deny-warn     # 168/168
-moon test  --target js   --deny-warn     # 168/168
+moon test  --target wasm --deny-warn     # 171/171（原 168 + 3 条批量帧 golden 测试）
+moon test  --target js   --deny-warn     # 171/171
 bash scripts/corpus.sh all               # 561 文件 / 19,098 声明 / 100% 解析
-bash scripts/gen.sh all                  # 561 stub + mypy --strict
-bash scripts/e2e.sh                      # 端到端 + 10 万次基准 + wheel 安装冒烟
+bash scripts/gen.sh all                  # 561 stub + mypy --strict（0 报错）
+bash scripts/e2e.sh                      # 端到端 + 10 万次基准（含批量对比）+ wheel 安装冒烟
 bash scripts/wheel.sh
 ```
 
@@ -222,7 +245,10 @@ bash scripts/wheel.sh
   `moon search "gyyyy6/moonbridge"` 与一个独立临时模块里的 `moon add gyyyy6/moonbridge`
   都确认 `gyyyy6/moonbridge@0.1.0` 可用。README 已补上 mooncakes 徽章与安装指引。
   这条记录本身也是人机分工的例证：**对外发布需要人的凭证，AI 只能准备、验证与留痕**。
-- **S7**：native（C ABI）后端、CI 平台矩阵、文档站。
+- **批量协议：已完成（2026-11-13）**。`mb_call_batch` + 自动 `*_many` + `run_batch`，
+  10 万次 5.87× 加速、0 泄漏，171/171 测试与既有内存曲线不回退；见 [批量协议报告](batching.md)。
+  **CI 平台矩阵与 REUSE 合规也已补齐**（wasm/js 双目标、5 个 job）。
+- **S7**：native（C ABI）后端、文档站。
 - **Codex 逐文件产出记录**（若确有使用）与 AI 会话记录的仓库内归档。
 - **30 秒演示**：已提供 [`docs/quickstart-demo.gif`](quickstart-demo.gif)（30 秒，由干净 venv 的
   真实命令输出逐帧生成，**非屏幕录制**）；本环境没有可用的屏幕录制工具，若要真正的录屏视频需另补。

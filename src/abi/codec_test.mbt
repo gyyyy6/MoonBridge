@@ -161,3 +161,70 @@ test "status frames carry ok, failure and panic apart" {
     _ => fail("expected panic")
   }
 }
+
+///|
+test "batch: a count and length-prefixed frames, byte for byte" {
+  // count=2, len=1 [1], len=4 [5,2,'h','i']. The Python `_codec.dump_batch`
+  // is generated from this same table, so a skew fails here and not at a
+  // user's call site.
+  let frame = @abi.encode_batch([
+    @abi.encode(@abi.Bool(true)),
+    @abi.encode(@abi.Str("hi")),
+  ])
+  assert_eq(bytes_of(frame), [
+    2, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, 0, 0, 5, 2, 104, 105,
+  ])
+  let back = @abi.decode_batch(frame)
+  assert_eq(back.length(), 2)
+  assert_eq(bytes_of(back[0]), [1])
+  assert_eq(bytes_of(back[1]), [5, 2, 104, 105])
+  assert_eq(bytes_of(@abi.encode_batch([])), [0, 0, 0, 0])
+  assert_eq(@abi.decode_batch(@abi.encode_batch([])).length(), 0)
+}
+
+///|
+test "batch: a length past the end and trailing bytes are rejected" {
+  // A frame whose declared length overruns the container must not be read as
+  // two short frames.
+  let good = @abi.encode_batch([@abi.encode(@abi.Int(7))])
+  let bytes = bytes_of(good)
+  let truncated = @buffer.from_array(
+    Array::makei(bytes.length() - 1, fn(i) { bytes[i].to_byte() }),
+  ).to_bytes()
+  let rejected = try {
+    ignore(@abi.decode_batch(truncated))
+    false
+  } catch {
+    @abi.DecodeError(_) => true
+  }
+  assert_true(rejected)
+  let padded = @buffer.from_array(
+    Array::makei(bytes.length() + 1, fn(i) {
+      if i < bytes.length() {
+        bytes[i].to_byte()
+      } else {
+        b'\x00'
+      }
+    }),
+  ).to_bytes()
+  let trailing = try {
+    ignore(@abi.decode_batch(padded))
+    false
+  } catch {
+    @abi.DecodeError(_) => true
+  }
+  assert_true(trailing)
+}
+
+///|
+test "batch: many frames round-trip in order" {
+  let frames : Array[Bytes] = []
+  for i = 0; i < 64; i = i + 1 {
+    frames.push(@abi.encode(@abi.Int(i)))
+  }
+  let back = @abi.decode_batch(@abi.encode_batch(frames))
+  assert_eq(back.length(), 64)
+  for i = 0; i < 64; i = i + 1 {
+    assert_eq(@abi.decode(back[i]), @abi.Int(i))
+  }
+}

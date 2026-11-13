@@ -157,9 +157,10 @@ jobs:
 
       # Regenerates the stubs, the callable modules and the guest half from one
       # plan, then drives the generated Python against the compiled guest and
-      # runs the 100k-call benchmark over six cases. The benchmark exits
-      # non-zero on a leak or on a release the guest could not route, which is
-      # the S4 acceptance criterion.
+      # runs the 100k-call benchmark over six cases plus the batch comparison
+      # (100k single calls vs 100k batched calls). The benchmark exits non-zero
+      # on a leak, on a release the guest could not route, or on a batch that
+      # lost a handle after a typed failure — the S4 and batching criteria.
       - name: Generate, run, benchmark
         run: bash scripts/e2e.sh
 

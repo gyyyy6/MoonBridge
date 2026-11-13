@@ -16,7 +16,7 @@
 | --- | --- |
 | [0. 30 秒版本](#0-30-秒版本) | 只想赶紧跑起来 |
 | [1. 环境准备](#1-环境准备) | Windows / macOS / Linux 各要装什么 |
-| [2. 场景一：直接使用现成的 Python 包](#2-场景一直接使用现成的-python-包) | `pip install` → `import` → 调用 → 处理异常 |
+| [2. 场景一：直接使用现成的 Python 包](#2-场景一直接使用现成的-python-包) | `pip install` → `import` → 调用 → 处理异常；含 [2.6 批量调用](#26-批量调用把-n-次调用压成-1-次跨越) |
 | [3. 场景二：把自己的 MoonBit 库变成 Python 包](#3-场景二把自己的-moonbit-库变成-python-包开发者指南) | 从 `moon new` 到自己的 `.whl` |
 | [4. 常见问题排查](#4-常见问题排查troubleshooting) | 5 个新手最容易踩的坑 |
 | [5. 速查表](#5-速查表) | 命名规则、异常类型、去哪找帮助 |
@@ -297,6 +297,53 @@ python -m mypy --strict check.py
 
 > 如果 mypy 说找不到 `moonbridge` 的类型信息，几乎都是"装 wheel 的 venv" 和
 > "跑 mypy 的 venv" 不是同一个，见 [§4 Q5](#q5mypy-报找不到-moonbridge-的类型存根)。
+
+### 2.6 批量调用：把 N 次调用压成 1 次跨越
+
+如果要对**同一个函数**连续调用很多次（比如校验一整批 JSON），单次调用每次都要付一次
+跨语言往返（约 20–40 μs）。批量协议把 N 组参数打包成**一次**跨越，实测 10 万次
+`valid()` 从 40.34 μs/次降到 6.87 μs/次（**5.87×**）。
+
+生成器会给可批量函数自动配一个 `<函数名>_many`，直接传参数元组列表即可：
+
+```python
+import moonbridge
+from moonbridge import moonbitlang__core__json as mjson
+
+moonbridge.install()
+results = mjson.valid_many([
+    ('{"a": 1}',),
+    ("{oops",),
+    ("[]",),
+])
+print(results)   # [True, False, True]
+```
+
+规则很简单，三条：
+
+1. **`_many` 的参数是「参数元组的列表」**：单参数就是 `(值,)`，别漏掉逗号。
+2. **一次 `valid_many([...])` 只跨越一次**。可以自己数：
+   `runtime.crossings` 在调用前后只增加 1，而 `runtime.calls` 增加的是列表长度。
+   （`host, runtime = moonbridge.install()` 能拿到这两个对象。）
+3. **一批里不要混入"期望失败"的调用**：中途某个调用抛异常时，整批都会以异常结束
+   （之前已执行的调用不会回滚）。`valid()` 这种返回 `False` 而不是抛异常的函数最适合批量。
+
+需要更底层的控制时，用 `moonbridge.run_batch(symbol, calls)`。`symbol` 是
+`<包名>::<函数名>` 形式的 MoonBit 全名，`calls` 是参数列表的列表：
+
+```python
+moonbridge.run_batch(
+    "moonbitlang/core/json::valid",
+    [('{"a": 1}',), ("{oops",)],
+)   # [True, False]
+```
+
+`run_batch` 还有个 `wrap=` 参数，供返回 MoonBit 对象（句柄）的函数使用——普通用户
+用自动生成的 `_many` 就够了，不必碰它。批量协议的设计与实测数据见
+[批量协议报告](batching.md)。
+
+> 哪些函数会生成 `_many`：全位置参数、且参数里没有函数值的自由函数。
+> 带可选参数（如 `parse`）或回调的函数没有无歧义的元组位置，仍请用单次调用或 `run_batch`。
 
 ---
 
@@ -643,6 +690,9 @@ python -m mypy --strict your_script.py
 | `moonbridge.MoonPanic` | guest 内部不可恢复状态 |
 | `moonbridge.MoonObject` | 所有句柄对象的基类；支持 `.close()` 和 `with` |
 | `mjson.valid(s)` / `mjson.parse(s)` | 判断 / 解析 JSON |
+| `mjson.valid_many([(s,), ...])` | 批量判断，N 次调用只用 1 次跨语言跨越 |
+| `moonbridge.run_batch(symbol, calls)` | 低层批量入口，自定义符号时使用 |
+| `runtime.calls` / `runtime.crossings` | 逻辑调用数 / 实际跨越次数，用来确认批量生效 |
 | `mjson.ParseError` / `JsonDecodeError` | 可 `except` 的具体异常类 |
 
 ### 5.3 想深入了解
@@ -653,6 +703,7 @@ python -m mypy --strict your_script.py
 | 为什么选 wasm、AI 工具在开发中的角色 | [开发复盘](development-retrospective.md) |
 | wheel 是怎么打出来的 | [S6 打包](s6-wheel.md) |
 | 跨边界对象 / 容器 / 回调 / 异常的细节 | [S5 容器与回调](s5-containers-and-callbacks.md) |
+| 想让高频调用变快、理解批量协议 | [批量协议报告](batching.md) |
 | 类型映射规则 | [S2 映射与生成](s2-type-mapping.md) |
 | 报告 bug | <https://github.com/gyyyy6/MoonBridge/issues> |
 

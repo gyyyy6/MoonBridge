@@ -9,7 +9,8 @@
 #   4. drive the generated Python against it: call functions, construct
 #      objects, read and write fields, pass a list / a dict / a callable, catch
 #      a typed error
-#   5. run the 100k-call benchmark, which exits non-zero on a leak
+#   5. run the 100k-call benchmark (six lifetime cases plus a 100k single-vs-
+#      batch comparison), which exits non-zero on a leak
 #   6. build a wheel through PEP 517, pip install it into a throwaway venv, and
 #      use it from outside the repository
 #

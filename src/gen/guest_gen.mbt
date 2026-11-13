@@ -8,8 +8,8 @@
 //! The generated file has four parts:
 //!
 //! 1. **The ABI surface**, which is identical for every guest: buffers the host
-//!    reads and writes, one discovered offset per buffer layout, and six
-//!    exports.
+//!    reads and writes, one discovered offset per buffer layout, and seven
+//!    exports (six for a single frame, one for a batch of frames).
 //! 2. **One decoder per wire shape**, emitted only for the shapes this plan
 //!    actually uses — an unused private function is a warning, and warnings are
 //!    errors in this repo.
@@ -895,12 +895,13 @@ pub fn render_guest(plan : Plan) -> String {
     "//! symbol the Python side sends is matched here. Regenerate instead of\n" +
     "//! editing: a hand edit breaks that guarantee and nothing will say so.\n" +
     "//!\n" +
-    "//! The ABI is six exports and two buffers:/n" +
+    "//! The ABI is seven exports and two buffers:/n" +
     "//!\n" +
     "//! ```text\n" +
     "//!   mb_in_reserve(n) -> ptr     grow the input buffer, return its object ptr\n" +
     "//!   mb_stage() -> ptr           the response buffer's object ptr\n" +
     "//!   mb_call(in_len) -> out_len  run the frame already in the input buffer\n" +
+    "//!   mb_call_batch(n) -> out_len run N frames in one crossing\n" +
     "//!   mb_probe() -> ptr           a fingerprinted Bytes, for layout discovery\n" +
     "//!   mb_probe_out() -> ptr       the same fingerprint as a FixedArray\n" +
     "//!   mb_live_handles() -> count  objects the tables still hold\n" +
@@ -1105,6 +1106,7 @@ pub fn render_guest(plan : Plan) -> String {
     "  publish(@abi.encode_status(dispatch(symbol, payload)))\n" +
     "}\n",
   )
+  sb.write_string(render_batch_support())
   sb.to_string()
 }
 
@@ -1208,6 +1210,69 @@ fn render_dispatch(plan : Plan) -> String {
     "}\n\n",
   )
   sb.to_string()
+}
+
+///|
+/// The batch half of the ABI, identical for every guest.
+///
+/// A batch request is N sub-frames in one `@abi.encode_batch` container; each
+/// sub-frame has the exact layout `mb_call` reads. The guest answers with one
+/// status frame per sub-call in the same container, so the host pays for one
+/// wasm call and one memory read instead of N of each.
+///
+/// This is deliberately *not* a second dispatcher: `run_one` calls the same
+/// `dispatch` a single call uses, so handles, callbacks, typed failures and
+/// release routing behave identically however a call arrived.
+fn render_batch_support() -> String {
+  "///|\n" +
+  "/// One sub-frame of a batch: `<u32 sym_len> <symbol utf8> <payload>`.\n" +
+  "/// Returning a `Status` rather than publishing it is what lets N sub-calls\n" +
+  "/// share one crossing.\n" +
+  "fn run_one(sub : Bytes) -> @abi.Status {\n" +
+  "  if sub.length() < 4 {\n" +
+  "    return @abi.Failed(\"batch sub-frame too short\")\n" +
+  "  }\n" +
+  "  let sym_len = read_u32(sub, 0)\n" +
+  "  if sym_len < 0 || 4 + sym_len > sub.length() {\n" +
+  "    return @abi.Failed(\"symbol overruns the frame\")\n" +
+  "  }\n" +
+  "  let symbol = @utf8.decode_lossy(slice(sub, 4, 4 + sym_len).exact_view())\n" +
+  "  let payload = slice(sub, 4 + sym_len, sub.length())\n" +
+  "  dispatch(symbol, payload)\n" +
+  "}\n\n" +
+  "///|\n" +
+  "/// A malformed request still owes the host a well-formed container: the\n" +
+  "/// host decodes the batch before it can report anything at all.\n" +
+  "fn batch_error(message : String) -> Bytes {\n" +
+  "  @abi.encode_batch([@abi.encode_status(@abi.Failed(message))])\n" +
+  "}\n\n" +
+  "///|\n" +
+  "/// Runs N frames in one host crossing.\n" +
+  "///\n" +
+  "/// Answers are collected in a local array and published once. Publishing\n" +
+  "/// per sub-call would overwrite the shared response buffer, which a\n" +
+  "/// callback raised inside a sub-call also uses to hand arguments over.\n" +
+  "#export_name(\"mb_call_batch\")\n" +
+  "pub fn call_batch(in_len : Int32) -> Int32 {\n" +
+  "  if in_len < 4 || in_len > buffers.inbox.length() {\n" +
+  "    return publish(batch_error(\"bad batch frame length\"))\n" +
+  "  }\n" +
+  "  let decoded = try {\n" +
+  "    Some(@abi.decode_batch(slice(buffers.inbox, 0, in_len)))\n" +
+  "  } catch {\n" +
+  "    _ => None\n" +
+  "  }\n" +
+  "  match decoded {\n" +
+  "    None => publish(batch_error(\"malformed batch frame\"))\n" +
+  "    Some(frames) => {\n" +
+  "      let answers : Array[Bytes] = []\n" +
+  "      for sub in frames {\n" +
+  "        answers.push(@abi.encode_status(run_one(sub)))\n" +
+  "      }\n" +
+  "      publish(@abi.encode_batch(answers))\n" +
+  "    }\n" +
+  "  }\n" +
+  "}\n\n"
 }
 
 ///|

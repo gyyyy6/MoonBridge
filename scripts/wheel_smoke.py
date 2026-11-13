@@ -74,6 +74,24 @@ def main() -> int:
     # A callback, i.e. the wasm import the wheel's guest carries.
     check("callback", mcb.call_with(lambda x: x * 2, 21), 42)
 
+    # The batch protocol: N calls in one crossing. `valid_many` is generated
+    # from the same signature as `valid`, so it is typed and needs no setup.
+    check(
+        "valid_many",
+        mjson.valid_many([('{"a": 1}',), ("{oops",), ("[]",)]),
+        [True, False, True],
+    )
+    check(
+        "run_batch",
+        moonbridge.run_batch(
+            "moonbitlang/core/json::valid", [('{"a": 1}',), ("{oops",)]
+        ),
+        [True, False],
+    )
+    before = runtime.crossings
+    mjson.valid_many([('{"a": 1}',)] * 64)
+    check("64 calls use one crossing", runtime.crossings - before, 1)
+
     # A typed failure, i.e. the error class the module registered at import.
     try:
         mjson.parse("{oops")
