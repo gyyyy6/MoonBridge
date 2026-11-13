@@ -32,6 +32,10 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
 > 可复现构建；`pip install` 之后 `import moonbridge; moonbridge.install()` 即可用，
 > 见 [S6 打包](docs/s6-wheel.md)。
 
+> **开发复盘与「AI 可解释」证据索引**：[docs/development-retrospective.md](docs/development-retrospective.md) —
+> 关键架构决策（wasm 优先、Plan 模型）、AI 工具在开发流程中的角色，以及
+> 「每一个技术选择该翻哪个文件、跑哪条命令才能解释」的对照表。
+
 ---
 
 ## 为什么要做这个
