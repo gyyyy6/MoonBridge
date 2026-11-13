@@ -473,6 +473,10 @@ python -m pip wheel --no-build-isolation --no-deps -w dist dist/myproj
 > 即可；`package` 必须保持 `moonbridge`（Python 包目录名）。
 > 仓库里的 `bash scripts/wheel.sh` 是同一套流程的自动化脚本，
 > 但它要求 `wasmtime` 装在**系统 Python** 里；用虚拟环境时请按上面的显式步骤走。
+>
+> 注意：输出的 wheel 文件名与仓库自带的那个相同，会**覆盖** `dist/` 里原有的
+> wheel（这正是第 7 步要装的新包）。想留一份原件，先把
+> `dist/moonbridge-0.1.0-py3-none-any.whl` 复制走，或把 `-w` 换成别的目录。
 
 #### 第 7 步：安装并调用自己的库
 

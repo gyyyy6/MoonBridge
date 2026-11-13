@@ -30,7 +30,8 @@ python -m venv .venv
 # macOS / Linux      → source .venv/bin/activate
 ```
 
-然后复制粘贴这 3 条命令（Windows / macOS / Linux 通用，无需任何其它前置条件）：
+然后复制粘贴这 3 条命令（Windows / macOS / Linux 通用；除 Python 3.9+ 和首次联网外，
+不需要安装任何额外软件、工具链或依赖）：
 
 ```bash
 python -m pip install ./dist/moonbridge-0.1.0-py3-none-any.whl
