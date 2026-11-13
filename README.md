@@ -18,26 +18,34 @@ moon.mod  ──moon info──▶  接口 IR  ──typemap──▶  代码生
 
 ## Quick Start
 
-三条命令，从零到调用一个真实的 MoonBit 函数（Python 3.9+，无需了解 wasm、无需配置路径或 C 工具链）：
+三条命令，从零到调用一个真实的 MoonBit 函数。**只要 Python 3.9+**：不需要懂 wasm、
+不需要装 MoonBit 或 C 工具链、不需要配置任何路径；`wasmtime` 由 `pip` 自动带上。
+
+先在**仓库根目录**建一个干净的虚拟环境（推荐：保证下面三条命令无缓存、无多余依赖）：
 
 ```bash
-# 1. 安装 wheel（仓库已附带；也可用 bash scripts/wheel.sh 自行重建）
-pip install ./dist/moonbridge-0.1.0-py3-none-any.whl
+python -m venv .venv
+# Windows PowerShell → .\.venv\Scripts\Activate.ps1
+# Windows cmd        → .venv\Scripts\activate.bat
+# macOS / Linux      → source .venv/bin/activate
+```
 
-# 2. import -> install -> 调用 MoonBit 标准库 json 的函数
-python - <<'PY'
-import moonbridge
-moonbridge.install()
-from moonbridge import moonbitlang__core__json as mjson
-print(mjson.valid('{"a": [1, 2, 3]}'))   # True
-PY
+然后复制粘贴这 3 条命令（Windows / macOS / Linux 通用，无需任何其它前置条件）：
 
-# 3. 完整闭环：11 条安装后断言（在仓库外运行可排除误导入本地 _gen/ 的可能）
+```bash
+python -m pip install ./dist/moonbridge-0.1.0-py3-none-any.whl
+
+python -c "import moonbridge; moonbridge.install(); from moonbridge import moonbitlang__core__json as m; print('valid:', m.valid('[1, 2, 3]'))"
+
 python scripts/wheel_smoke.py
 ```
 
+预期 `valid: True`，随后 11 项自检全部 `ok`、末行 `wheel installed and functional`。
 `moonbridge.install()` 会加载 wheel 内置的 wasm guest；第 3 步依次验证 JSON 往返、
 对象构造与字段读写、`list` / `dict` / `lambda` 跨边界、类型化异常，以及结束时句柄归零。
+首次安装需要联网一次（拉取 `wasmtime`）。
+
+**👉 [完整保姆级使用手册（点我）](docs/usage-guide.md)** —— 面向完全不懂 MoonBit 的 Python 开发者：环境准备（Windows/macOS/Linux）、安装 / 导入 / 调用 / 异常处理、把**自己的** MoonBit 库变成 Python 包、以及 5 个常见坑的解法。
 
 ![Quick Start 演示：30 秒，真实命令输出逐帧生成（非屏幕录制）](docs/quickstart-demo.gif)
 
@@ -51,6 +59,8 @@ MoonBridge 以两种形态分发：
 - **MoonBit 模块**（已发布到 mooncakes.io）：`moon add gyyyy6/moonbridge`
   包页：<https://mooncakes.io/docs/gyyyy6/moonbridge> ｜ 版本 `0.1.0` ｜ Apache-2.0。
 - **Python wheel**：`pip install ./dist/moonbridge-0.1.0-py3-none-any.whl`（见上方 Quick Start）。
+  预编译的 wheel **随仓库一起提交**，克隆下来即可安装，不需要 MoonBit 工具链；
+  想从源码重建用 `bash scripts/e2e.sh`。完整用法见 [用户手册](docs/usage-guide.md)。
 
 发布实测：`moon publish --dry-run` 返回 `202 Accepted`、`moon publish` 返回 `200 OK`；
 `moon search "gyyyy6/moonbridge"` 可见 `gyyyy6/moonbridge@0.1.0`，

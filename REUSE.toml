@@ -16,8 +16,12 @@
 #    versions. The `.mbti` interface dumps used as the test corpus are
 #    downloaded at build time into `_corpus/` (gitignored); no third-party
 #    source code is copied into, or redistributed by, this repository.
-#  * `dist/`, `_build/`, `_gen*/`, `_scratch/` and `.mypy_cache/` are build
-#    artifacts and are gitignored, so they are not Covered Files.
+#  * `_build/`, `_gen*/`, `_scratch/`, `.mypy_cache/` and everything under
+#    `dist/` except the committed `moonbridge-*.whl` are build artifacts and
+#    are gitignored, so they are not Covered Files. The one committed wheel is
+#    project output built by `scripts/wheel.sh` from the sources above; it is
+#    shipped so the README Quick Start works on a fresh clone, and it is
+#    covered by the aggregate annotation below.
 #  * `LICENSE` is the Apache-2.0 License File itself; `moon.mod` and
 #    `pack/pyproject.toml` carry the same SPDX identifier as metadata.
 #  * If a file with a different license is ever added, put an `override`

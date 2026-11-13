@@ -1,7 +1,11 @@
 # Build output
+# The prebuilt wheel IS committed: it is what lets a pure-Python developer run
+# the README Quick Start from a fresh clone with no MoonBit toolchain. Every
+# other file under dist/ (staged project, throwaway venv) is a build artifact.
 _build/
 target/
-dist/
+dist/*
+!dist/*.whl
 build/
 
 # MoonBit package cache
