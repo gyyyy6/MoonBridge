@@ -13,7 +13,7 @@ on:
 
 jobs:
   moonbit:
-    name: MoonBit (check / test / fmt)
+    name: MoonBit (check / test / fmt, wasm + js)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +24,7 @@ jobs:
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
           "$HOME/.moon/bin/moon" version --all
 
+      # Canonical gate, exactly as documented in README / the retrospective.
       - name: Check
         run: moon check --deny-warn
 
@@ -32,6 +33,45 @@ jobs:
 
       - name: Format
         run: moon fmt --check
+
+      # `moon.mod` sets preferred_target = "wasm", so the three steps above
+      # only exercise wasm. Run the same gate on both explicit backends: the
+      # generator CLI itself runs on js (the only backend needing no C
+      # toolchain) while the generated guest is compiled to wasm. A
+      # target-specific regression must not hide behind the default target.
+      # These re-run cheaply because the build cache is warm in this job.
+      - name: Check (wasm)
+        run: moon check --target wasm --deny-warn
+
+      - name: Test (wasm)
+        run: moon test --target wasm --deny-warn
+
+      - name: Check (js)
+        run: moon check --target js --deny-warn
+
+      - name: Test (js)
+        run: moon test --target js --deny-warn
+
+  license:
+    name: REUSE compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The charset-normalizer extra keeps encoding detection working on
+      # runners that do not ship the `file` command.
+      - name: Install REUSE
+        run: python -m pip install --disable-pip-version-check "reuse[charset-normalizer]"
+
+      # Every tracked file is declared in REUSE.toml; LICENSES/Apache-2.0.txt
+      # carries the license text. Fails on any file without copyright/license
+      # information, on a bad SPDX identifier, or on a missing license text.
+      - name: Check licensing metadata
+        run: reuse lint
 
   corpus:
     name: Corpus (real .mbti files parse)
@@ -81,11 +121,16 @@ jobs:
       - name: Install type-check dependencies
         run: python -m pip install --disable-pip-version-check mypy wasmtime==50.0.1
 
-      # Generates one .pyi per package from the corpus and type-checks the
-      # whole generated package. This is the S2 acceptance criterion: zero
-      # errors, no `# type: ignore`.
-      - name: Generate and type-check stubs
+      # Generates one .pyi per package from the corpus. `gen.sh all` also runs
+      # `mypy --strict` internally; the separate named step below repeats it so
+      # the S2 acceptance criterion (zero errors, no `# type: ignore`) is an
+      # explicit, independently visible gate rather than a side effect hidden
+      # inside a script.
+      - name: Generate stubs
         run: bash scripts/gen.sh all
+
+      - name: mypy --strict (generated stubs)
+        run: python -m mypy --strict --no-incremental --python-version 3.13 _gen/moonbridge
 
   end-to-end:
     name: End to end (generated Python calls a real guest)
