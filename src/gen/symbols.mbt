@@ -649,6 +649,14 @@ fn Builder::wire_out(
             }
           _ => None
         }
+      } else if args.length() == 0 && self.world.is_suberror(pkg, q) {
+        // A `suberror` is only ever an exception on the Python side: the
+        // generated class is built from a message, so there is no constructor
+        // that could take a handle. A method that *returns* an error value
+        // therefore cannot be bound — emitting `wrap(SomeError, ...)` would
+        // name a class the runtime cannot instantiate (and would not type
+        // check either, since `wrap` binds to the object base class).
+        None
       } else {
         self.wire_in(pkg, ty, owner)
       }

@@ -81,7 +81,7 @@ MoonBridge 以两种形态分发：
 > S5：`Array` / `Map` / `Option` / `Result` / 回调 / 异常字段全部可跨边界——Python 的 `list`、
 > `dict`、`lambda` 直接传，MoonBit 的 `suberror` 变成 Python 的 `except` 类，
 > 见 [S5 容器与回调](docs/s5-containers-and-callbacks.md)。
-> S6：**打成真正的 wheel**——607 KB，567 个条目，`requires = []` 的自写 PEP 517 后端，
+> S6：**打成真正的 wheel**——617 KB，571 个条目，`requires = []` 的自写 PEP 517 后端，
 > 可复现构建；`pip install` 之后 `import moonbridge; moonbridge.install()` 即可用，
 > 见 [S6 打包](docs/s6-wheel.md)。
 > **批量协议（2026-11-13）**：`mb_call_batch` 一次跨越跑 N 帧，10 万次 `valid()`
@@ -300,12 +300,12 @@ python -c "import moonbridge; moonbridge.install()"
 ```
 
 构建系统是自己写的 219 行 PEP 517 后端（`pack/moonbridge_build.py`），`requires = []`——用户不必为了装这个包先装
-setuptools，断网也能构建。wheel 里是可移植的 wasm 与 553 个 `.pyi`，`Tag: py3-none-any`
+setuptools，断网也能构建。wheel 里是可移植的 wasm 与 557 个 `.pyi`，`Tag: py3-none-any`
 由 `Requires-Dist: wasmtime>=20` 兜住平台差异。
 
 | | S5 | S6 |
 |---|---|---|
-| 分发形态 | `_gen/` 一个目录 | **`moonbridge-0.1.0-py3-none-any.whl`**（607 KB / 567 条目） |
+| 分发形态 | `_gen/` 一个目录 | **`moonbridge-0.1.0-py3-none-any.whl`**（617 KB / 571 条目） |
 | 构建依赖 | — | **0**（标准库） |
 | 构建可复现 | — | 两次构建 sha256 相同，且与 pip 驱动后端的结果相同 |
 | 安装后的初始化 | 传 wasm 路径 | `moonbridge.install()` |
@@ -395,7 +395,15 @@ python bridge_test.py
 > CLI 目前在 js 后端运行（唯一不依赖 C 工具链的后端），文件读取只有一处
 > `extern "js"`，其余代码与目标无关。
 
-工具链：MoonBit `0.1.20261104`（moonc `0.10.20`）/ Python 3.13 / wasmtime 50.0.1。
+工具链：MoonBit `0.1.20261119`（moonc `0.10.22`）/ Python 3.13 / wasmtime 50.0.1。
+
+> **工具链漂移**是这个项目的常态而不是意外：CI 只能装 `latest`（版本化下载地址返回 403），
+> 而生成器的输入是编译器产出的 `.mbti`、输出是调用 core 的代码。所以 core 一升级，红是正常的，
+> 修法固定三步：`bash scripts/corpus.sh core` 刷新语料 → 重新生成 guest →
+> 在 `src/gen` 里修掉生成器对新 core 的不兼容。`0.1.20261119`（moonc `0.10.22`）这一轮修的是：
+> `Bytes::new` 等五个废弃 API、`@lexbuf.StringScanner` 变成只读类型（构造器与 `cursor` 写入
+> 都不可用，生成器改为跳过而不再产出编不过的代码）、以及「返回 `suberror` 值」的方法
+> 不再生成 `wrap()`（错误只以异常形式跨边界）。
 
 ---
 

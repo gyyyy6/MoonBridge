@@ -18,7 +18,7 @@ calls because the object is built and then read:
 
 ``ctor+field``  construct a `Position`, read both fields, release it.
 ``ctor/gc``     the same, with the release deferred to the collector.
-``setter``      construct a `StringScanner`, write `cursor`, read it back.
+``setter``      construct a `Cursor`, write `pos`, read it back.
 
 Then the batch protocol runs the same `--calls` validations twice: once as a
 loop of single calls, once as `valid_many` in chunks, and reports the speedup.
@@ -271,7 +271,7 @@ def main() -> int:
     import moonbridge  # noqa: PLC0415
     from moonbridge import _runtime, _wasmtime  # noqa: PLC0415
     from moonbridge import moonbitlang__core__json as mjson  # noqa: PLC0415
-    from moonbridge import moonbitlang__core__lexbuf as mlex  # noqa: PLC0415
+    from moonbridge import gyyyy6__moonbridge__callbacks as mcb  # noqa: PLC0415
 
     global hook, hook_rt, POINTS
     hook, hook_rt = _wasmtime.open_runtime(Path(args.wasm))
@@ -345,13 +345,13 @@ def main() -> int:
     # A mutable field is the one shape that writes back into the guest object,
     # so it gets its own case: read, write, read back.
     def write_field(i: int) -> None:
-        scan = mlex.StringScanner(TEXT, 0)
-        if scan.cursor != 0:
-            raise AssertionError(f"fresh scanner at {scan.cursor}")
-        scan.cursor = i % 11
-        if scan.cursor != i % 11:
-            raise AssertionError(f"cursor did not take: {scan.cursor}")
-        scan.close()
+        cur = mcb.Cursor(0, TEXT)
+        if cur.pos != 0:
+            raise AssertionError(f"fresh cursor at {cur.pos}")
+        cur.pos = i % 11
+        if cur.pos != i % 11:
+            raise AssertionError(f"pos did not take: {cur.pos}")
+        cur.close()
 
     results.append(measure("setter", calls, write_field))
     gc.collect()

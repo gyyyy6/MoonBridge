@@ -933,8 +933,12 @@ pub fn render_guest(plan : Plan) -> String {
       ""
     }) +
     "}\n\n" +
-    "///|\nlet buffers : Buffers = { inbox: Bytes::new(1024), " +
-    (if needs_callback_buf { "cb_out: Bytes::new(256), " } else { "" }) +
+    "///|\nlet buffers : Buffers = { inbox: Bytes::make(1024, b'\\x00'), " +
+    (if needs_callback_buf {
+      "cb_out: Bytes::make(256, b'\\x00'), "
+    } else {
+      ""
+    }) +
     "}\n\n",
   )
   sb.write_string(
@@ -980,7 +984,7 @@ pub fn render_guest(plan : Plan) -> String {
     "pub fn in_reserve(n : Int32) -> Bytes {\n" +
     "  if buffers.inbox.length() < n {\n" +
     "    let size = if n * 2 > 1024 { n * 2 } else { 1024 }\n" +
-    "    buffers.inbox = Bytes::new(size)\n" +
+    "    buffers.inbox = Bytes::make(size, b'\\x00')\n" +
     "  }\n" +
     "  buffers.inbox\n" +
     "}\n\n" +
@@ -1376,7 +1380,7 @@ fn render_callback_support() -> String {
   "    while size < n {\n" +
   "      size = size * 2\n" +
   "    }\n" +
-  "    buffers.cb_out = Bytes::new(size)\n" +
+  "    buffers.cb_out = Bytes::make(size, b'\\x00')\n" +
   "  }\n" +
   "  buffers.cb_out\n" +
   "}\n\n" +

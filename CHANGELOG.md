@@ -3,6 +3,25 @@
 本项目的开发按阶段推进（S0–S7），每个阶段有独立报告（`docs/`）与可复现命令。
 版本号遵循 mooncakes 发布版本；日期为提交日期。
 
+## [Unreleased] — 适配 core 0.10.22（2026-11-23）
+
+CI 只装 `latest` 工具链，`moon 0.1.20261119 / moonc 0.10.22` 让 `MoonBit (check/test/fmt)` 与
+`End to end` 两个 job 变红：新 core 废弃了五个 API，并把 `@lexbuf.StringScanner` 改成了只读类型。
+以下修复都在生成器侧完成，生成物重新产出，没有手改 `src/guest_gen`。
+
+- fix(gen): `Bytes::new(n)` → `Bytes::make(n, b'\x00')`（`src/gen/guest_gen.mbt` 四处模板）
+- fix(gen): 「返回 `suberror` 值」的函数不再生成绑定。`DecodeContext::error` 原来会生成
+  `wrap(JsonDecodeError, ...)`，而错误类由消息构造、`wrap` 又只接受对象基类，运行时与类型检查都过不去；
+  现在按 `unmarshalable-return` 跳过——错误只以异常形式跨边界，这与 S5 的既有约定一致
+- fix(gen): `StringScanner` 只读化后，重新生成即自动不再产出构造器与 `cursor` 写入，
+  不再是「生成出编不过的代码」
+- test: 探针包 `src/callbacks` 增加 `Cursor { mut pos, label }`；`bench/e2e.py` 与 `bench/bench.py`
+  的 setter 用例改打它，字段写入的覆盖不再依赖标准库里恰好还有可变结构体
+- chore: 重新生成 guest（core 语料 140 个接口 / 4,445 条声明 / 解析 100%）、重建 wheel
+  （631,724 B / 571 条目 / 557 个 `.pyi` / guest wasm 386,651 B）
+- 门禁：`moon check/test/fmt --deny-warn`（wasm + js）、171/171 测试、`mypy --strict` 144 文件 0 报错、
+  `scripts/e2e.sh` 42 条断言 + 0 泄漏、wheel 安装后 12 项断言全绿
+
 ## [Unreleased] — 批量协议（S7 部分）
 
 - feat(abi): 新增批量帧容器 `<u32 count>(<u32 len><frame>)*` 与 `mb_call_batch` 导出，复用既有 dispatch

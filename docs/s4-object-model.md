@@ -94,6 +94,12 @@ class StringScanner(_runtime.MoonObject):
             "moonbitlang/core/lexbuf::StringScanner::__set_cursor", [self, value])
 ```
 
+> **工具链更新后的状态（moonc 0.10.22）**：上面这段是 S4 当时的产出，`StringScanner` 当时是
+> `pub(all) struct` 且 `cursor` 可变。新 core 把它改成了只读类型，构造器和 `cursor` 写入都不再
+> 存在，生成器现在会跳过它而不是产出编不过的代码。为了不把「字段写入」这条能力从端到端覆盖里
+> 弄丢，探针包 `src/callbacks` 里新增了 `Cursor`（一个 `mut pos` + 一个只读 `label`），
+> `bench/e2e.py` 与 `bench/bench.py` 的 setter 用例改为打它。
+
 三条规则：
 
 1. **构造器接管句柄**：`__new__` 在 guest 里造出对象，Python 拿到的就是那个对象的句柄，

@@ -38,3 +38,18 @@ pub fn call_opt(f : () -> String?) -> String {
 pub fn call_both(f : () -> Int32, g : (Int32) -> Int32, x : Int32) -> Int32 {
   g(f() + x)
 }
+
+///|
+/// One mutable and one read-only field, so the generated setter/getter pair has
+/// something to be tested against.
+///
+/// This lives here rather than in the standard library because the field-write
+/// test needs a type whose mutability the bridge can rely on: `@lexbuf.StringScanner`
+/// was mutable when this probe was written and is read-only as of moonc 0.10.22,
+/// and no struct reachable from `json` / `builtin` / `lexbuf` exposes a `mut`
+/// field any more. Regenerating after a core bump therefore cannot silently
+/// take the write path out of the end-to-end coverage.
+pub(all) struct Cursor {
+  mut pos : Int32
+  label : String
+}

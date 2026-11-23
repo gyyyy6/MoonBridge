@@ -1,9 +1,9 @@
 """End-to-end: generated Python calls the real MoonBit guest through wasmtime.
 
 Nothing here is hand-written per function. `parse`, `valid`, `Json.stringify`,
-`Position`, `StringScanner` and `ParseError` all come from one generator run
-over published `moonbitlang/core` interfaces, and the bodies are the ones
-`--bind` emitted.
+`Position` and `ParseError` all come from one generator run over published
+`moonbitlang/core` interfaces, `Cursor` comes from this repository's own probe
+package, and the bodies are the ones `--bind` emitted.
 
 The last section is the S4 claim: a generated class can be *used*. It is
 constructed by the guest, its fields are read through generated getters, a
@@ -32,7 +32,6 @@ def main() -> int:
     sys.path.insert(0, str(Path(args.package).resolve()))
     from moonbridge import _runtime, _wasmtime  # noqa: PLC0415
     from moonbridge import moonbitlang__core__json as mjson  # noqa: PLC0415
-    from moonbridge import moonbitlang__core__lexbuf as mlex  # noqa: PLC0415
     from moonbridge import gyyyy6__moonbridge__callbacks as mcb  # noqa: PLC0415
 
     host, rt = _wasmtime.open_runtime(Path(args.wasm))
@@ -77,14 +76,16 @@ def main() -> int:
     check("live after handle arguments", host.live_handles(), 0)
 
     # A mutable field: written through the generated setter, then read back
-    # through the generated getter. Nothing about this pair is in the runtime.
-    scan = mlex.StringScanner("hello world", 0)
-    check("mut field read", scan.cursor, 0)
-    scan.cursor = 6
-    check("mut field written", scan.cursor, 6)
-    check("read-only field still reads", scan.data, "hello world")
-    scan.close()
-    check("live after scanner", host.live_handles(), 0)
+    # through the generated getter. `Cursor` is this repository's own probe
+    # type, so the write path is covered without depending on which structs the
+    # current standard library happens to make mutable.
+    cur = mcb.Cursor(0, "hello world")
+    check("mut field read", cur.pos, 0)
+    cur.pos = 6
+    check("mut field written", cur.pos, 6)
+    check("read-only field still reads", cur.label, "hello world")
+    cur.close()
+    check("live after cursor", host.live_handles(), 0)
 
     print()
     print("-- handles through functions --")

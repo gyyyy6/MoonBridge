@@ -36,7 +36,10 @@ priv struct Buffers {
 }
 
 ///|
-let buffers : Buffers = { inbox: Bytes::new(1024), cb_out: Bytes::new(256), }
+let buffers : Buffers = {
+  inbox: Bytes::make(1024, b'\x00'),
+  cb_out: Bytes::make(256, b'\x00'),
+}
 
 ///|
 /// A fingerprinted buffer the host probes once to learn where the data of a
@@ -63,14 +66,14 @@ priv struct Tables {
   json_Json : @abi.HandleTable[@ref.Ref[@json.Json]]
   json_JsonDecodeError : @abi.HandleTable[@ref.Ref[@json.JsonDecodeError]]
   json_ParseError : @abi.HandleTable[@ref.Ref[@json.ParseError]]
+  json_DecodeContext : @abi.HandleTable[@ref.Ref[@json.DecodeContext]]
   json_Replacer : @abi.HandleTable[@ref.Ref[@json.Replacer]]
-  json_JsonPath : @abi.HandleTable[@ref.Ref[@json.JsonPath]]
   json_Position : @abi.HandleTable[@ref.Ref[@json.Position]]
   builtin_Failure : @abi.HandleTable[@ref.Ref[@builtin.Failure]]
+  builtin_Byte : @abi.HandleTable[@ref.Ref[@builtin.Byte]]
   builtin_Int64 : @abi.HandleTable[@ref.Ref[@builtin.Int64]]
   builtin_UInt16 : @abi.HandleTable[@ref.Ref[@builtin.UInt16]]
   builtin_UInt64 : @abi.HandleTable[@ref.Ref[@builtin.UInt64]]
-  builtin_Byte : @abi.HandleTable[@ref.Ref[@builtin.Byte]]
   builtin_Char : @abi.HandleTable[@ref.Ref[@builtin.Char]]
   builtin_Bytes : @abi.HandleTable[@ref.Ref[@builtin.Bytes]]
   builtin_V128 : @abi.HandleTable[@ref.Ref[@builtin.V128]]
@@ -81,8 +84,11 @@ priv struct Tables {
   builtin_SourceLoc : @abi.HandleTable[@ref.Ref[@builtin.SourceLoc]]
   builtin_StringBuilder : @abi.HandleTable[@ref.Ref[@builtin.StringBuilder]]
   builtin_StringView : @abi.HandleTable[@ref.Ref[@builtin.StringView]]
+  lexbuf_BytesLexbuf : @abi.HandleTable[@ref.Ref[@lexbuf.BytesLexbuf]]
+  lexbuf_BytesScanner : @abi.HandleTable[@ref.Ref[@lexbuf.BytesScanner]]
   lexbuf_Lexbuf : @abi.HandleTable[@ref.Ref[@lexbuf.Lexbuf]]
   lexbuf_StringScanner : @abi.HandleTable[@ref.Ref[@lexbuf.StringScanner]]
+  callbacks_Cursor : @abi.HandleTable[@ref.Ref[@callbacks.Cursor]]
 }
 
 ///|
@@ -90,14 +96,14 @@ let tables : Tables = {
   json_Json: @abi.HandleTable::new(),
   json_JsonDecodeError: @abi.HandleTable::new(),
   json_ParseError: @abi.HandleTable::new(),
+  json_DecodeContext: @abi.HandleTable::new(),
   json_Replacer: @abi.HandleTable::new(),
-  json_JsonPath: @abi.HandleTable::new(),
   json_Position: @abi.HandleTable::new(),
   builtin_Failure: @abi.HandleTable::new(),
+  builtin_Byte: @abi.HandleTable::new(),
   builtin_Int64: @abi.HandleTable::new(),
   builtin_UInt16: @abi.HandleTable::new(),
   builtin_UInt64: @abi.HandleTable::new(),
-  builtin_Byte: @abi.HandleTable::new(),
   builtin_Char: @abi.HandleTable::new(),
   builtin_Bytes: @abi.HandleTable::new(),
   builtin_V128: @abi.HandleTable::new(),
@@ -108,8 +114,11 @@ let tables : Tables = {
   builtin_SourceLoc: @abi.HandleTable::new(),
   builtin_StringBuilder: @abi.HandleTable::new(),
   builtin_StringView: @abi.HandleTable::new(),
+  lexbuf_BytesLexbuf: @abi.HandleTable::new(),
+  lexbuf_BytesScanner: @abi.HandleTable::new(),
   lexbuf_Lexbuf: @abi.HandleTable::new(),
   lexbuf_StringScanner: @abi.HandleTable::new(),
+  callbacks_Cursor: @abi.HandleTable::new(),
 }
 
 ///|
@@ -118,7 +127,7 @@ let tables : Tables = {
 pub fn in_reserve(n : Int32) -> Bytes {
   if buffers.inbox.length() < n {
     let size = if n * 2 > 1024 { n * 2 } else { 1024 }
-    buffers.inbox = Bytes::new(size)
+    buffers.inbox = Bytes::make(size, b'\x00')
   }
   buffers.inbox
 }
@@ -224,7 +233,7 @@ pub fn cb_buffer(n : Int32) -> Bytes {
     while size < n {
       size = size * 2
     }
-    buffers.cb_out = Bytes::new(size)
+    buffers.cb_out = Bytes::make(size, b'\x00')
   }
   buffers.cb_out
 }
@@ -309,6 +318,23 @@ fn dec_json_ParseError(v : @abi.Value?) -> @json.ParseError? {
       match x.as_handle() {
         Some(id) =>
           match tables.json_ParseError.get(id) {
+            Some(slot) => Some(slot.val)
+            None => None
+          }
+        None => None
+      }
+    None => None
+  }
+}
+
+///|
+/// A handle from the host, resolved against the table for `@json.DecodeContext`.
+fn dec_json_DecodeContext(v : @abi.Value?) -> @json.DecodeContext? {
+  match v {
+    Some(x) =>
+      match x.as_handle() {
+        Some(id) =>
+          match tables.json_DecodeContext.get(id) {
             Some(slot) => Some(slot.val)
             None => None
           }
@@ -404,23 +430,6 @@ fn dec_json_Replacer(v : @abi.Value?) -> @json.Replacer? {
       match x.as_handle() {
         Some(id) =>
           match tables.json_Replacer.get(id) {
-            Some(slot) => Some(slot.val)
-            None => None
-          }
-        None => None
-      }
-    None => None
-  }
-}
-
-///|
-/// A handle from the host, resolved against the table for `@json.JsonPath`.
-fn dec_json_JsonPath(v : @abi.Value?) -> @json.JsonPath? {
-  match v {
-    Some(x) =>
-      match x.as_handle() {
-        Some(id) =>
-          match tables.json_JsonPath.get(id) {
             Some(slot) => Some(slot.val)
             None => None
           }
@@ -769,6 +778,24 @@ fn dec_builtin_StringView(v : @abi.Value?) -> @builtin.StringView? {
 }
 
 ///|
+fn dec_cb__to_opt_builtin_Bytes(v : @abi.Value?) -> (() -> @builtin.Bytes?)? {
+  match v {
+    Some(raw) =>
+      match raw.as_int() {
+        Some(id) =>
+          Some(fn() {
+            match invoke_callback(id, []) {
+              Some(v) => dec_builtin_Bytes(Some(v))
+              None => None
+            }
+          })
+        None => None
+      }
+    None => None
+  }
+}
+
+///|
 fn dec_cb__to_opt_str(v : @abi.Value?) -> (() -> String?)? {
   match v {
     Some(raw) =>
@@ -787,13 +814,13 @@ fn dec_cb__to_opt_str(v : @abi.Value?) -> (() -> String?)? {
 }
 
 ///|
-/// A handle from the host, resolved against the table for `@lexbuf.StringScanner`.
-fn dec_lexbuf_StringScanner(v : @abi.Value?) -> @lexbuf.StringScanner? {
+/// A handle from the host, resolved against the table for `@lexbuf.Lexbuf`.
+fn dec_lexbuf_Lexbuf(v : @abi.Value?) -> @lexbuf.Lexbuf? {
   match v {
     Some(x) =>
       match x.as_handle() {
         Some(id) =>
-          match tables.lexbuf_StringScanner.get(id) {
+          match tables.lexbuf_Lexbuf.get(id) {
             Some(slot) => Some(slot.val)
             None => None
           }
@@ -848,6 +875,23 @@ fn dec_cb_int_to_int(v : @abi.Value?) -> ((Int32) -> Int32)? {
 }
 
 ///|
+/// A handle from the host, resolved against the table for `@callbacks.Cursor`.
+fn dec_callbacks_Cursor(v : @abi.Value?) -> @callbacks.Cursor? {
+  match v {
+    Some(x) =>
+      match x.as_handle() {
+        Some(id) =>
+          match tables.callbacks_Cursor.get(id) {
+            Some(slot) => Some(slot.val)
+            None => None
+          }
+        None => None
+      }
+    None => None
+  }
+}
+
+///|
 fn enc_json_Json(v : @json.Json?) -> @abi.Value raise {
   match v {
     Some(x) => @abi.Handle(tables.json_Json.insert(@ref.Ref(x)))
@@ -872,9 +916,9 @@ fn enc_str(v : String?) -> @abi.Value {
 }
 
 ///|
-fn enc_json_JsonPath(v : @json.JsonPath?) -> @abi.Value raise {
+fn enc_json_DecodeContext(v : @json.DecodeContext?) -> @abi.Value raise {
   match v {
-    Some(x) => @abi.Handle(tables.json_JsonPath.insert(@ref.Ref(x)))
+    Some(x) => @abi.Handle(tables.json_DecodeContext.insert(@ref.Ref(x)))
     None => @abi.Value::unit()
   }
 }
@@ -901,6 +945,14 @@ fn enc_unit(_v : Unit?) -> @abi.Value {
 }
 
 ///|
+fn enc_builtin_Byte(v : @builtin.Byte?) -> @abi.Value raise {
+  match v {
+    Some(x) => @abi.Handle(tables.builtin_Byte.insert(@ref.Ref(x)))
+    None => @abi.Value::unit()
+  }
+}
+
+///|
 fn enc_builtin_Int64(v : @builtin.Int64?) -> @abi.Value raise {
   match v {
     Some(x) => @abi.Handle(tables.builtin_Int64.insert(@ref.Ref(x)))
@@ -920,14 +972,6 @@ fn enc_builtin_UInt16(v : @builtin.UInt16?) -> @abi.Value raise {
 fn enc_builtin_UInt64(v : @builtin.UInt64?) -> @abi.Value raise {
   match v {
     Some(x) => @abi.Handle(tables.builtin_UInt64.insert(@ref.Ref(x)))
-    None => @abi.Value::unit()
-  }
-}
-
-///|
-fn enc_builtin_Byte(v : @builtin.Byte?) -> @abi.Value raise {
-  match v {
-    Some(x) => @abi.Handle(tables.builtin_Byte.insert(@ref.Ref(x)))
     None => @abi.Value::unit()
   }
 }
@@ -1009,6 +1053,22 @@ fn enc_builtin_StringView(v : @builtin.StringView?) -> @abi.Value raise {
 }
 
 ///|
+fn enc_lexbuf_BytesLexbuf(v : @lexbuf.BytesLexbuf?) -> @abi.Value raise {
+  match v {
+    Some(x) => @abi.Handle(tables.lexbuf_BytesLexbuf.insert(@ref.Ref(x)))
+    None => @abi.Value::unit()
+  }
+}
+
+///|
+fn enc_lexbuf_BytesScanner(v : @lexbuf.BytesScanner?) -> @abi.Value raise {
+  match v {
+    Some(x) => @abi.Handle(tables.lexbuf_BytesScanner.insert(@ref.Ref(x)))
+    None => @abi.Value::unit()
+  }
+}
+
+///|
 fn enc_lexbuf_Lexbuf(v : @lexbuf.Lexbuf?) -> @abi.Value raise {
   match v {
     Some(x) => @abi.Handle(tables.lexbuf_Lexbuf.insert(@ref.Ref(x)))
@@ -1025,19 +1085,27 @@ fn enc_lexbuf_StringScanner(v : @lexbuf.StringScanner?) -> @abi.Value raise {
 }
 
 ///|
+fn enc_callbacks_Cursor(v : @callbacks.Cursor?) -> @abi.Value raise {
+  match v {
+    Some(x) => @abi.Handle(tables.callbacks_Cursor.insert(@ref.Ref(x)))
+    None => @abi.Value::unit()
+  }
+}
+
+///|
 /// Objects the tables still hold.
 fn live_total() -> Int32 {
   tables.json_Json.live_count() +
   tables.json_JsonDecodeError.live_count() +
   tables.json_ParseError.live_count() +
+  tables.json_DecodeContext.live_count() +
   tables.json_Replacer.live_count() +
-  tables.json_JsonPath.live_count() +
   tables.json_Position.live_count() +
   tables.builtin_Failure.live_count() +
+  tables.builtin_Byte.live_count() +
   tables.builtin_Int64.live_count() +
   tables.builtin_UInt16.live_count() +
   tables.builtin_UInt64.live_count() +
-  tables.builtin_Byte.live_count() +
   tables.builtin_Char.live_count() +
   tables.builtin_Bytes.live_count() +
   tables.builtin_V128.live_count() +
@@ -1048,8 +1116,11 @@ fn live_total() -> Int32 {
   tables.builtin_SourceLoc.live_count() +
   tables.builtin_StringBuilder.live_count() +
   tables.builtin_StringView.live_count() +
+  tables.lexbuf_BytesLexbuf.live_count() +
+  tables.lexbuf_BytesScanner.live_count() +
   tables.lexbuf_Lexbuf.live_count() +
-  tables.lexbuf_StringScanner.live_count()
+  tables.lexbuf_StringScanner.live_count() +
+  tables.callbacks_Cursor.live_count()
 }
 
 ///|
@@ -1060,14 +1131,14 @@ fn release_tag(tag : Int32, id : Int32) -> Bool {
     1 => tables.json_Json.release(id)
     2 => tables.json_JsonDecodeError.release(id)
     3 => tables.json_ParseError.release(id)
-    4 => tables.json_Replacer.release(id)
-    5 => tables.json_JsonPath.release(id)
+    4 => tables.json_DecodeContext.release(id)
+    5 => tables.json_Replacer.release(id)
     6 => tables.json_Position.release(id)
     7 => tables.builtin_Failure.release(id)
-    8 => tables.builtin_Int64.release(id)
-    9 => tables.builtin_UInt16.release(id)
-    10 => tables.builtin_UInt64.release(id)
-    11 => tables.builtin_Byte.release(id)
+    8 => tables.builtin_Byte.release(id)
+    9 => tables.builtin_Int64.release(id)
+    10 => tables.builtin_UInt16.release(id)
+    11 => tables.builtin_UInt64.release(id)
     12 => tables.builtin_Char.release(id)
     13 => tables.builtin_Bytes.release(id)
     14 => tables.builtin_V128.release(id)
@@ -1078,8 +1149,11 @@ fn release_tag(tag : Int32, id : Int32) -> Bool {
     19 => tables.builtin_SourceLoc.release(id)
     20 => tables.builtin_StringBuilder.release(id)
     21 => tables.builtin_StringView.release(id)
-    22 => tables.lexbuf_Lexbuf.release(id)
-    23 => tables.lexbuf_StringScanner.release(id)
+    22 => tables.lexbuf_BytesLexbuf.release(id)
+    23 => tables.lexbuf_BytesScanner.release(id)
+    24 => tables.lexbuf_Lexbuf.release(id)
+    25 => tables.lexbuf_StringScanner.release(id)
+    26 => tables.callbacks_Cursor.release(id)
     _ => false
   }
 }
@@ -1261,6 +1335,88 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
       let value = @json.ParseError::to_string(a0)
       @abi.Ok(enc_str(Some(value)))
     }
+    "moonbitlang/core/json::DecodeContext::add_index" => {
+      let a0 = match dec_json_DecodeContext(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/json::DecodeContext::add_index: bad argument 1",
+          )
+      }
+      let a1 = match dec_int(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/json::DecodeContext::add_index: bad argument 2",
+          )
+      }
+      let value = @json.DecodeContext::add_index(a0, a1)
+      @abi.Ok(enc_json_DecodeContext(Some(value))) catch {
+        error => @abi.Failed(error.to_string())
+      }
+    }
+    "moonbitlang/core/json::DecodeContext::add_key" => {
+      let a0 = match dec_json_DecodeContext(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/json::DecodeContext::add_key: bad argument 1",
+          )
+      }
+      let a1 = match dec_str(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/json::DecodeContext::add_key: bad argument 2",
+          )
+      }
+      let value = @json.DecodeContext::add_key(a0, a1)
+      @abi.Ok(enc_json_DecodeContext(Some(value))) catch {
+        error => @abi.Failed(error.to_string())
+      }
+    }
+    "moonbitlang/core/json::DecodeContext::copy" => {
+      let a0 = match dec_json_DecodeContext(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/json::DecodeContext::copy: bad argument 1",
+          )
+      }
+      let value = @json.DecodeContext::copy(a0)
+      @abi.Ok(enc_json_DecodeContext(Some(value))) catch {
+        error => @abi.Failed(error.to_string())
+      }
+    }
+    "moonbitlang/core/json::DecodeContext::equal" => {
+      let a0 = match dec_json_DecodeContext(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/json::DecodeContext::equal: bad argument 1",
+          )
+      }
+      let a1 = match dec_json_DecodeContext(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/json::DecodeContext::equal: bad argument 2",
+          )
+      }
+      let value = @json.DecodeContext::equal(a0, a1)
+      @abi.Ok(enc_bool(Some(value)))
+    }
+    "moonbitlang/core/json::DecodeContext::to_string" => {
+      let a0 = match dec_json_DecodeContext(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/json::DecodeContext::to_string: bad argument 1",
+          )
+      }
+      let value = @json.DecodeContext::to_string(a0)
+      @abi.Ok(enc_str(Some(value)))
+    }
     "moonbitlang/core/json::Json::array" => {
       let a0 = match dec_arr_json_Json(arg(argv, 0)) {
         Some(v) => v
@@ -1428,75 +1584,6 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
         error => @abi.Failed(error.to_string())
       }
     }
-    "moonbitlang/core/json::JsonPath::add_index" => {
-      let a0 = match dec_json_JsonPath(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/json::JsonPath::add_index: bad argument 1",
-          )
-      }
-      let a1 = match dec_int(arg(argv, 1)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/json::JsonPath::add_index: bad argument 2",
-          )
-      }
-      let value = @json.JsonPath::add_index(a0, a1)
-      @abi.Ok(enc_json_JsonPath(Some(value))) catch {
-        error => @abi.Failed(error.to_string())
-      }
-    }
-    "moonbitlang/core/json::JsonPath::add_key" => {
-      let a0 = match dec_json_JsonPath(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/json::JsonPath::add_key: bad argument 1",
-          )
-      }
-      let a1 = match dec_str(arg(argv, 1)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/json::JsonPath::add_key: bad argument 2",
-          )
-      }
-      let value = @json.JsonPath::add_key(a0, a1)
-      @abi.Ok(enc_json_JsonPath(Some(value))) catch {
-        error => @abi.Failed(error.to_string())
-      }
-    }
-    "moonbitlang/core/json::JsonPath::equal" => {
-      let a0 = match dec_json_JsonPath(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/json::JsonPath::equal: bad argument 1",
-          )
-      }
-      let a1 = match dec_json_JsonPath(arg(argv, 1)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/json::JsonPath::equal: bad argument 2",
-          )
-      }
-      let value = @json.JsonPath::equal(a0, a1)
-      @abi.Ok(enc_bool(Some(value)))
-    }
-    "moonbitlang/core/json::JsonPath::to_string" => {
-      let a0 = match dec_json_JsonPath(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/json::JsonPath::to_string: bad argument 1",
-          )
-      }
-      let value = @json.JsonPath::to_string(a0)
-      @abi.Ok(enc_str(Some(value)))
-    }
     "moonbitlang/core/json::Position::__new__" => {
       let a0 = match dec_int(arg(argv, 0)) {
         Some(v) => v
@@ -1642,6 +1729,19 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
       let value = @builtin.Bool::hash(a0)
       @abi.Ok(enc_int(Some(value)))
     }
+    "moonbitlang/core/builtin::Bool::to_byte" => {
+      let a0 = match dec_bool(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::Bool::to_byte: bad argument 1",
+          )
+      }
+      let value = @builtin.Bool::to_byte(a0)
+      @abi.Ok(enc_builtin_Byte(Some(value))) catch {
+        error => @abi.Failed(error.to_string())
+      }
+    }
     "moonbitlang/core/builtin::Bool::to_int" => {
       let a0 = match dec_bool(arg(argv, 0)) {
         Some(v) => v
@@ -1723,6 +1823,17 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
         error => @abi.Failed(error.to_string())
       }
     }
+    "moonbitlang/core/builtin::Byte::clz" => {
+      let a0 = match dec_builtin_Byte(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::Byte::clz: bad argument 1",
+          )
+      }
+      let value = @builtin.Byte::clz(a0)
+      @abi.Ok(enc_int(Some(value)))
+    }
     "moonbitlang/core/builtin::Byte::compare" => {
       let a0 = match dec_builtin_Byte(arg(argv, 0)) {
         Some(v) => v
@@ -1739,6 +1850,17 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
           )
       }
       let value = @builtin.Byte::compare(a0, a1)
+      @abi.Ok(enc_int(Some(value)))
+    }
+    "moonbitlang/core/builtin::Byte::ctz" => {
+      let a0 = match dec_builtin_Byte(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::Byte::ctz: bad argument 1",
+          )
+      }
+      let value = @builtin.Byte::ctz(a0)
       @abi.Ok(enc_int(Some(value)))
     }
     "moonbitlang/core/builtin::Byte::default" => {
@@ -1865,6 +1987,46 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
           )
       }
       let value = @builtin.Byte::lxor(a0, a1)
+      @abi.Ok(enc_builtin_Byte(Some(value))) catch {
+        error => @abi.Failed(error.to_string())
+      }
+    }
+    "moonbitlang/core/builtin::Byte::max" => {
+      let a0 = match dec_builtin_Byte(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::Byte::max: bad argument 1",
+          )
+      }
+      let a1 = match dec_builtin_Byte(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::Byte::max: bad argument 2",
+          )
+      }
+      let value = @builtin.Byte::max(a0, a1)
+      @abi.Ok(enc_builtin_Byte(Some(value))) catch {
+        error => @abi.Failed(error.to_string())
+      }
+    }
+    "moonbitlang/core/builtin::Byte::min" => {
+      let a0 = match dec_builtin_Byte(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::Byte::min: bad argument 1",
+          )
+      }
+      let a1 = match dec_builtin_Byte(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::Byte::min: bad argument 2",
+          )
+      }
+      let value = @builtin.Byte::min(a0, a1)
       @abi.Ok(enc_builtin_Byte(Some(value))) catch {
         error => @abi.Failed(error.to_string())
       }
@@ -2047,7 +2209,11 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
             "moonbitlang/core/builtin::Byte::to_string: bad argument 1",
           )
       }
-      let value = @builtin.Byte::to_string(a0)
+      let a1 = dec_int(arg(argv, 1))
+      let value = match a1 {
+        Some(v1) => @builtin.Byte::to_string(a0, radix=v1)
+        None => @builtin.Byte::to_string(a0)
+      }
       @abi.Ok(enc_str(Some(value)))
     }
     "moonbitlang/core/builtin::Byte::to_uint16" => {
@@ -2484,19 +2650,6 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
       let value = @builtin.Int64::equal(a0, a1)
       @abi.Ok(enc_bool(Some(value)))
     }
-    "moonbitlang/core/builtin::Int64::from_int" => {
-      let a0 = match dec_int(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/builtin::Int64::from_int: bad argument 1",
-          )
-      }
-      let value = @builtin.Int64::from_int(a0)
-      @abi.Ok(enc_builtin_Int64(Some(value))) catch {
-        error => @abi.Failed(error.to_string())
-      }
-    }
     "moonbitlang/core/builtin::Int64::hash" => {
       let a0 = match dec_builtin_Int64(arg(argv, 0)) {
         Some(v) => v
@@ -2812,6 +2965,17 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
         error => @abi.Failed(error.to_string())
       }
     }
+    "moonbitlang/core/builtin::UInt16::clz" => {
+      let a0 = match dec_builtin_UInt16(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::UInt16::clz: bad argument 1",
+          )
+      }
+      let value = @builtin.UInt16::clz(a0)
+      @abi.Ok(enc_int(Some(value)))
+    }
     "moonbitlang/core/builtin::UInt16::compare" => {
       let a0 = match dec_builtin_UInt16(arg(argv, 0)) {
         Some(v) => v
@@ -2828,6 +2992,17 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
           )
       }
       let value = @builtin.UInt16::compare(a0, a1)
+      @abi.Ok(enc_int(Some(value)))
+    }
+    "moonbitlang/core/builtin::UInt16::ctz" => {
+      let a0 = match dec_builtin_UInt16(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::UInt16::ctz: bad argument 1",
+          )
+      }
+      let value = @builtin.UInt16::ctz(a0)
       @abi.Ok(enc_int(Some(value)))
     }
     "moonbitlang/core/builtin::UInt16::div" => {
@@ -2985,6 +3160,46 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
         error => @abi.Failed(error.to_string())
       }
     }
+    "moonbitlang/core/builtin::UInt16::max" => {
+      let a0 = match dec_builtin_UInt16(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::UInt16::max: bad argument 1",
+          )
+      }
+      let a1 = match dec_builtin_UInt16(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::UInt16::max: bad argument 2",
+          )
+      }
+      let value = @builtin.UInt16::max(a0, a1)
+      @abi.Ok(enc_builtin_UInt16(Some(value))) catch {
+        error => @abi.Failed(error.to_string())
+      }
+    }
+    "moonbitlang/core/builtin::UInt16::min" => {
+      let a0 = match dec_builtin_UInt16(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::UInt16::min: bad argument 1",
+          )
+      }
+      let a1 = match dec_builtin_UInt16(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::UInt16::min: bad argument 2",
+          )
+      }
+      let value = @builtin.UInt16::min(a0, a1)
+      @abi.Ok(enc_builtin_UInt16(Some(value))) catch {
+        error => @abi.Failed(error.to_string())
+      }
+    }
     "moonbitlang/core/builtin::UInt16::mod" => {
       let a0 = match dec_builtin_UInt16(arg(argv, 0)) {
         Some(v) => v
@@ -3024,6 +3239,17 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
       @abi.Ok(enc_builtin_UInt16(Some(value))) catch {
         error => @abi.Failed(error.to_string())
       }
+    }
+    "moonbitlang/core/builtin::UInt16::popcnt" => {
+      let a0 = match dec_builtin_UInt16(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::UInt16::popcnt: bad argument 1",
+          )
+      }
+      let value = @builtin.UInt16::popcnt(a0)
+      @abi.Ok(enc_int(Some(value)))
     }
     "moonbitlang/core/builtin::UInt16::shl" => {
       let a0 = match dec_builtin_UInt16(arg(argv, 0)) {
@@ -3110,6 +3336,17 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
       @abi.Ok(enc_builtin_Char(value)) catch {
         error => @abi.Failed(error.to_string())
       }
+    }
+    "moonbitlang/core/builtin::UInt16::to_double" => {
+      let a0 = match dec_builtin_UInt16(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::UInt16::to_double: bad argument 1",
+          )
+      }
+      let value = @builtin.UInt16::to_double(a0)
+      @abi.Ok(enc_double(Some(value)))
     }
     "moonbitlang/core/builtin::UInt16::to_int" => {
       let a0 = match dec_builtin_UInt16(arg(argv, 0)) {
@@ -3569,19 +3806,6 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
         error => @abi.Failed(error.to_string())
       }
     }
-    "moonbitlang/core/builtin::UInt64::trunc_double" => {
-      let a0 = match dec_double(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/builtin::UInt64::trunc_double: bad argument 1",
-          )
-      }
-      let value = @builtin.UInt64::trunc_double(a0)
-      @abi.Ok(enc_builtin_UInt64(Some(value))) catch {
-        error => @abi.Failed(error.to_string())
-      }
-    }
     "moonbitlang/core/builtin::Double::abs" => {
       let a0 = match dec_double(arg(argv, 0)) {
         Some(v) => v
@@ -3640,17 +3864,6 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
       let value = @builtin.Double::compare(a0, a1)
       @abi.Ok(enc_int(Some(value)))
     }
-    "moonbitlang/core/builtin::Double::convert_uint64" => {
-      let a0 = match dec_builtin_UInt64(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/builtin::Double::convert_uint64: bad argument 1",
-          )
-      }
-      let value = @builtin.Double::convert_uint64(a0)
-      @abi.Ok(enc_double(Some(value)))
-    }
     "moonbitlang/core/builtin::Double::div" => {
       let a0 = match dec_double(arg(argv, 0)) {
         Some(v) => v
@@ -3696,17 +3909,6 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
           )
       }
       let value = @builtin.Double::floor(a0)
-      @abi.Ok(enc_double(Some(value)))
-    }
-    "moonbitlang/core/builtin::Double::from_int" => {
-      let a0 = match dec_int(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/builtin::Double::from_int: bad argument 1",
-          )
-      }
-      let value = @builtin.Double::from_int(a0)
       @abi.Ok(enc_double(Some(value)))
     }
     "moonbitlang/core/builtin::Double::hash" => {
@@ -4418,6 +4620,24 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
       let value = @builtin.String::find(a0, a1[:])
       @abi.Ok(enc_int(value))
     }
+    "moonbitlang/core/builtin::String::find_code_unit" => {
+      let a0 = match dec_str(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::String::find_code_unit: bad argument 1",
+          )
+      }
+      let a1 = match dec_builtin_UInt16(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::String::find_code_unit: bad argument 2",
+          )
+      }
+      let value = @builtin.String::find_code_unit(a0, a1)
+      @abi.Ok(enc_int(value))
+    }
     "moonbitlang/core/builtin::String::from_array" => {
       let a0 = match dec_arr_builtin_Char(arg(argv, 0)) {
         Some(v) => v
@@ -4772,6 +4992,24 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
           )
       }
       let value = @builtin.String::rev_find(a0, a1[:])
+      @abi.Ok(enc_int(value))
+    }
+    "moonbitlang/core/builtin::String::rev_find_code_unit" => {
+      let a0 = match dec_str(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::String::rev_find_code_unit: bad argument 1",
+          )
+      }
+      let a1 = match dec_builtin_UInt16(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::String::rev_find_code_unit: bad argument 2",
+          )
+      }
+      let value = @builtin.String::rev_find_code_unit(a0, a1)
       @abi.Ok(enc_int(value))
     }
     "moonbitlang/core/builtin::String::strip_prefix" => {
@@ -5253,19 +5491,6 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
         error => @abi.Failed(error.to_string())
       }
     }
-    "moonbitlang/core/builtin::Bytes::new" => {
-      let a0 = match dec_int(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/builtin::Bytes::new: bad argument 1",
-          )
-      }
-      let value = @builtin.Bytes::new(a0)
-      @abi.Ok(enc_builtin_Bytes(Some(value))) catch {
-        error => @abi.Failed(error.to_string())
-      }
-    }
     "moonbitlang/core/builtin::Bytes::repeat" => {
       let a0 = match dec_builtin_Bytes(arg(argv, 0)) {
         Some(v) => v
@@ -5382,12 +5607,12 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
         Some(v1) =>
           match a2 {
             Some(v2) =>
-              @builtin.Bytes::to_unchecked_string(a0, offset=v1, length=v2)
+              @builtin.Bytes::to_unchecked_string(a0, offset=v1, len=v2)
             None => @builtin.Bytes::to_unchecked_string(a0, offset=v1)
           }
         None =>
           match a2 {
-            Some(v2) => @builtin.Bytes::to_unchecked_string(a0, length=v2)
+            Some(v2) => @builtin.Bytes::to_unchecked_string(a0, len=v2)
             None => @builtin.Bytes::to_unchecked_string(a0)
           }
       }
@@ -6538,6 +6763,24 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
       let value = @builtin.StringView::find(a0, a1)
       @abi.Ok(enc_int(value))
     }
+    "moonbitlang/core/builtin::StringView::find_code_unit" => {
+      let a0 = match dec_builtin_StringView(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::StringView::find_code_unit: bad argument 1",
+          )
+      }
+      let a1 = match dec_builtin_UInt16(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::StringView::find_code_unit: bad argument 2",
+          )
+      }
+      let value = @builtin.StringView::find_code_unit(a0, a1)
+      @abi.Ok(enc_int(value))
+    }
     "moonbitlang/core/builtin::StringView::from_array" => {
       let a0 = match dec_arr_builtin_Char(arg(argv, 0)) {
         Some(v) => v
@@ -6892,6 +7135,24 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
       let value = @builtin.StringView::rev_find(a0, a1)
       @abi.Ok(enc_int(value))
     }
+    "moonbitlang/core/builtin::StringView::rev_find_code_unit" => {
+      let a0 = match dec_builtin_StringView(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::StringView::rev_find_code_unit: bad argument 1",
+          )
+      }
+      let a1 = match dec_builtin_UInt16(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/builtin::StringView::rev_find_code_unit: bad argument 2",
+          )
+      }
+      let value = @builtin.StringView::rev_find_code_unit(a0, a1)
+      @abi.Ok(enc_int(value))
+    }
     "moonbitlang/core/builtin::StringView::start_offset" => {
       let a0 = match dec_builtin_StringView(arg(argv, 0)) {
         Some(v) => v
@@ -7077,88 +7338,59 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
         error => @abi.Failed(error.to_string())
       }
     }
-    "moonbitlang/core/lexbuf::Lexbuf::from_fn" => {
+    "moonbitlang/core/lexbuf::BytesLexbuf::BytesLexbuf" => {
+      let a0 = match dec_cb__to_opt_builtin_Bytes(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/lexbuf::BytesLexbuf::BytesLexbuf: bad argument 1",
+          )
+      }
+      let value = @lexbuf.BytesLexbuf::BytesLexbuf(a0)
+      @abi.Ok(enc_lexbuf_BytesLexbuf(Some(value))) catch {
+        error => @abi.Failed(error.to_string())
+      }
+    }
+    "moonbitlang/core/lexbuf::BytesScanner::BytesScanner" => {
+      let a0 = match dec_builtin_BytesView(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "moonbitlang/core/lexbuf::BytesScanner::BytesScanner: bad argument 1",
+          )
+      }
+      let a1 = dec_int(arg(argv, 1))
+      let value = match a1 {
+        Some(v1) => @lexbuf.BytesScanner::BytesScanner(a0, cursor=v1)
+        None => @lexbuf.BytesScanner::BytesScanner(a0)
+      }
+      @abi.Ok(enc_lexbuf_BytesScanner(Some(value))) catch {
+        error => @abi.Failed(error.to_string())
+      }
+    }
+    "moonbitlang/core/lexbuf::Lexbuf::Lexbuf" => {
       let a0 = match dec_cb__to_opt_str(arg(argv, 0)) {
         Some(v) => v
         None =>
           return @abi.Failed(
-            "moonbitlang/core/lexbuf::Lexbuf::from_fn: bad argument 1",
+            "moonbitlang/core/lexbuf::Lexbuf::Lexbuf: bad argument 1",
           )
       }
-      let value = @lexbuf.Lexbuf::from_fn(a0)
+      let value = @lexbuf.Lexbuf::Lexbuf(a0)
       @abi.Ok(enc_lexbuf_Lexbuf(Some(value))) catch {
         error => @abi.Failed(error.to_string())
       }
     }
-    "moonbitlang/core/lexbuf::StringScanner::__new__" => {
-      let a0 = match dec_str(arg(argv, 0)) {
+    "moonbitlang/core/lexbuf::Lexbuf::read_line" => {
+      let a0 = match dec_lexbuf_Lexbuf(arg(argv, 0)) {
         Some(v) => v
         None =>
           return @abi.Failed(
-            "moonbitlang/core/lexbuf::StringScanner::__new__: bad argument 1",
+            "moonbitlang/core/lexbuf::Lexbuf::read_line: bad argument 1",
           )
       }
-      let a1 = match dec_int(arg(argv, 1)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/lexbuf::StringScanner::__new__: bad argument 2",
-          )
-      }
-      let value = @lexbuf.StringScanner::{ data: a0[:], cursor: a1, }
-      @abi.Ok(enc_lexbuf_StringScanner(Some(value))) catch {
-        error => @abi.Failed(error.to_string())
-      }
-    }
-    "moonbitlang/core/lexbuf::StringScanner::__get_data" => {
-      let a0 = match dec_lexbuf_StringScanner(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/lexbuf::StringScanner::__get_data: bad argument 1",
-          )
-      }
-      let value = a0.data
-      @abi.Ok(enc_strview(Some(value)))
-    }
-    "moonbitlang/core/lexbuf::StringScanner::__get_cursor" => {
-      let a0 = match dec_lexbuf_StringScanner(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/lexbuf::StringScanner::__get_cursor: bad argument 1",
-          )
-      }
-      let value = a0.cursor
-      @abi.Ok(enc_int(Some(value)))
-    }
-    "moonbitlang/core/lexbuf::StringScanner::__set_cursor" => {
-      let id = match arg_handle(argv, 0) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/lexbuf::StringScanner::__set_cursor: bad argument 1",
-          )
-      }
-      let value = match dec_int(arg(argv, 1)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/lexbuf::StringScanner::__set_cursor: bad argument 2",
-          )
-      }
-      match tables.lexbuf_StringScanner.get(id) {
-        Some(slot) => {
-          let current = slot.val
-          current.cursor = value
-          slot.val = current
-          @abi.Ok(@abi.Value::unit())
-        }
-        None =>
-          @abi.Failed(
-            "moonbitlang/core/lexbuf::StringScanner::__set_cursor: stale handle",
-          )
-      }
+      let value = @lexbuf.Lexbuf::read_line(a0)
+      @abi.Ok(enc_strview(value))
     }
     "moonbitlang/core/lexbuf::StringScanner::StringScanner" => {
       let a0 = match dec_str(arg(argv, 0)) {
@@ -7241,6 +7473,76 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
       }
       let value = @callbacks.call_with(a0, a1)
       @abi.Ok(enc_int(Some(value)))
+    }
+    "gyyyy6/moonbridge/callbacks::Cursor::__new__" => {
+      let a0 = match dec_int(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "gyyyy6/moonbridge/callbacks::Cursor::__new__: bad argument 1",
+          )
+      }
+      let a1 = match dec_str(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "gyyyy6/moonbridge/callbacks::Cursor::__new__: bad argument 2",
+          )
+      }
+      let value = @callbacks.Cursor::{ pos: a0, label: a1, }
+      @abi.Ok(enc_callbacks_Cursor(Some(value))) catch {
+        error => @abi.Failed(error.to_string())
+      }
+    }
+    "gyyyy6/moonbridge/callbacks::Cursor::__get_pos" => {
+      let a0 = match dec_callbacks_Cursor(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "gyyyy6/moonbridge/callbacks::Cursor::__get_pos: bad argument 1",
+          )
+      }
+      let value = a0.pos
+      @abi.Ok(enc_int(Some(value)))
+    }
+    "gyyyy6/moonbridge/callbacks::Cursor::__set_pos" => {
+      let id = match arg_handle(argv, 0) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "gyyyy6/moonbridge/callbacks::Cursor::__set_pos: bad argument 1",
+          )
+      }
+      let value = match dec_int(arg(argv, 1)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "gyyyy6/moonbridge/callbacks::Cursor::__set_pos: bad argument 2",
+          )
+      }
+      match tables.callbacks_Cursor.get(id) {
+        Some(slot) => {
+          let current = slot.val
+          current.pos = value
+          slot.val = current
+          @abi.Ok(@abi.Value::unit())
+        }
+        None =>
+          @abi.Failed(
+            "gyyyy6/moonbridge/callbacks::Cursor::__set_pos: stale handle",
+          )
+      }
+    }
+    "gyyyy6/moonbridge/callbacks::Cursor::__get_label" => {
+      let a0 = match dec_callbacks_Cursor(arg(argv, 0)) {
+        Some(v) => v
+        None =>
+          return @abi.Failed(
+            "gyyyy6/moonbridge/callbacks::Cursor::__get_label: bad argument 1",
+          )
+      }
+      let value = a0.label
+      @abi.Ok(enc_str(Some(value)))
     }
     "abi.release" =>
       match arg(argv, 0) {
