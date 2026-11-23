@@ -299,7 +299,7 @@ pip install ./dist/moonbridge-0.1.0-py3-none-any.whl
 python -c "import moonbridge; moonbridge.install()"
 ```
 
-构建系统是自己写的 128 行 PEP 517 后端，`requires = []`——用户不必为了装这个包先装
+构建系统是自己写的 219 行 PEP 517 后端（`pack/moonbridge_build.py`），`requires = []`——用户不必为了装这个包先装
 setuptools，断网也能构建。wheel 里是可移植的 wasm 与 553 个 `.pyi`，`Tag: py3-none-any`
 由 `Requires-Dist: wasmtime>=20` 兜住平台差异。
 
@@ -395,7 +395,7 @@ python bridge_test.py
 > CLI 目前在 js 后端运行（唯一不依赖 C 工具链的后端），文件读取只有一处
 > `extern "js"`，其余代码与目标无关。
 
-工具链：MoonBit `0.1.20261023`（moonc `0.10.17`）/ Python 3.13 / wasmtime 50.0.1。
+工具链：MoonBit `0.1.20261104`（moonc `0.10.20`）/ Python 3.13 / wasmtime 50.0.1。
 
 ---
 
@@ -418,6 +418,8 @@ python bridge_test.py
       10 万次 `valid()` **5.87× 加速**（40.34 → 6.87 μs/次），0 泄漏
       （见 [报告](docs/batching.md)；兑现 ADR 0001 第 2 条）
 - [ ] **S7** native(C ABI) 后端、文档站（CI 双目标矩阵与 REUSE 合规已在 S6 后补齐）
+
+逐版本的改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
