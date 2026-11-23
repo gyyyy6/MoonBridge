@@ -28,7 +28,7 @@
 先进入仓库根目录，建一个干净的虚拟环境（见 [§1](#1-环境准备)），然后粘贴这三条命令：
 
 ```bash
-pip install ./dist/moonbridge-0.1.0-py3-none-any.whl
+pip install ./dist/moonbridge-0.1.1-py3-none-any.whl
 
 python -c "import moonbridge; moonbridge.install(); from moonbridge import moonbitlang__core__json as m; print('valid:', m.valid('[1, 2, 3]'))"
 
@@ -143,7 +143,7 @@ git --version
 
 ## 2. 场景一：直接使用现成的 Python 包
 
-以仓库里自带的 `moonbridge-0.1.0-py3-none-any.whl` 为例。这个 wheel 内含
+以仓库里自带的 `moonbridge-0.1.1-py3-none-any.whl` 为例。这个 wheel 内含
 MoonBit 标准库 `json` / `builtin` / `lexbuf` 的绑定和一个回调测试包。
 
 ### 2.1 安装
@@ -151,17 +151,17 @@ MoonBit 标准库 `json` / `builtin` / `lexbuf` 的绑定和一个回调测试�
 在**仓库根目录**执行（`dist/` 里的 wheel 已经随仓库提供）：
 
 ```bash
-python -m pip install ./dist/moonbridge-0.1.0-py3-none-any.whl
+python -m pip install ./dist/moonbridge-0.1.1-py3-none-any.whl
 ```
 
 首次安装会从 PyPI 拉取 `wasmtime`，所以需要联网一次。典型输出：
 
 ```text
-Processing ./dist/moonbridge-0.1.0-py3-none-any.whl
-Collecting wasmtime>=20 (from moonbridge==0.1.0)
+Processing ./dist/moonbridge-0.1.1-py3-none-any.whl
+Collecting wasmtime>=20 (from moonbridge==0.1.1)
   Downloading wasmtime-50.0.1-py3-none-win_amd64.whl (8.0 MB)
 Installing collected packages: wasmtime, moonbridge
-Successfully installed moonbridge-0.1.0 wasmtime-50.0.1
+Successfully installed moonbridge-0.1.1 wasmtime-50.0.1
 ```
 
 验证装到了哪：
@@ -523,12 +523,12 @@ python -m pip wheel --no-build-isolation --no-deps -w dist dist/myproj
 >
 > 注意：输出的 wheel 文件名与仓库自带的那个相同，会**覆盖** `dist/` 里原有的
 > wheel（这正是第 7 步要装的新包）。想留一份原件，先把
-> `dist/moonbridge-0.1.0-py3-none-any.whl` 复制走，或把 `-w` 换成别的目录。
+> `dist/moonbridge-0.1.1-py3-none-any.whl` 复制走，或把 `-w` 换成别的目录。
 
 #### 第 7 步：安装并调用自己的库
 
 ```bash
-python -m pip install --force-reinstall dist/moonbridge-0.1.0-py3-none-any.whl
+python -m pip install --force-reinstall dist/moonbridge-0.1.1-py3-none-any.whl
 python -c "import moonbridge; moonbridge.install(); from moonbridge import gyyyy6__moonbridge__mylib as my; print(my.add(2, 40)); print(my.greet('Python'))"
 ```
 
@@ -609,14 +609,14 @@ moonbridge.install()          # 只要一次，放在 import 之后、第一次�
 python --version                       # 必须 >= 3.9
 python -m pip --version                # 确认 pip 属于同一个 python
 python -c "import sys; print(sys.executable)"   # 看清当前解释器绝对路径
-python -m pip install --force-reinstall ./dist/moonbridge-0.1.0-py3-none-any.whl
+python -m pip install --force-reinstall ./dist/moonbridge-0.1.1-py3-none-any.whl
 ```
 
 **始终用 `python -m pip ...` 而不是裸 `pip ...`**，就能避免装错环境。
 
 ---
 
-### Q4：`pip` 说找不到 `dist/moonbridge-0.1.0-py3-none-any.whl`
+### Q4：`pip` 说找不到 `dist/moonbridge-0.1.1-py3-none-any.whl`
 
 **原因**：不在仓库根目录；或用了早期克隆（旧版本的仓库没有把 wheel 纳入版本库）。
 
@@ -624,8 +624,8 @@ python -m pip install --force-reinstall ./dist/moonbridge-0.1.0-py3-none-any.whl
 
 ```bash
 cd MoonBridge                          # 回到仓库根目录
-ls -l dist/moonbridge-0.1.0-py3-none-any.whl     # 确认文件在
-python -m pip install ./dist/moonbridge-0.1.0-py3-none-any.whl
+ls -l dist/moonbridge-0.1.1-py3-none-any.whl     # 确认文件在
+python -m pip install ./dist/moonbridge-0.1.1-py3-none-any.whl
 ```
 
 如果你是 2026-11 之前克隆的仓库，先 `git pull` 更新；wheel 是随仓库一起提交的。
@@ -644,7 +644,7 @@ python -m pip install ./dist/moonbridge-0.1.0-py3-none-any.whl
 **解法**：
 
 ```bash
-python -m pip install --force-reinstall ./dist/moonbridge-0.1.0-py3-none-any.whl
+python -m pip install --force-reinstall ./dist/moonbridge-0.1.1-py3-none-any.whl
 python -m pip install mypy
 python -m mypy --version                      # 注意要用同一个 python -m
 python -c "import moonbridge, pathlib; print(pathlib.Path(moonbridge.__file__).parent / 'py.typed')"
@@ -672,12 +672,12 @@ python -m mypy --strict your_script.py
 
 | 想做什么 | 命令 |
 | --- | --- |
-| 安装 | `python -m pip install ./dist/moonbridge-0.1.0-py3-none-any.whl` |
+| 安装 | `python -m pip install ./dist/moonbridge-0.1.1-py3-none-any.whl` |
 | 初始化 | `moonbridge.install()`（每个进程一次） |
 | 导入某个 MoonBit 包 | `from moonbridge import moonbitlang__core__json as mjson` |
 | 跑 11 项自检 | `python scripts/wheel_smoke.py` |
 | 类型检查 | `python -m mypy --strict your_script.py` |
-| 重装（升级/修复） | `python -m pip install --force-reinstall ./dist/moonbridge-0.1.0-py3-none-any.whl` |
+| 重装（升级/修复） | `python -m pip install --force-reinstall ./dist/moonbridge-0.1.1-py3-none-any.whl` |
 
 ### 5.2 API 速查
 
