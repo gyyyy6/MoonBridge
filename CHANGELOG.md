@@ -3,6 +3,19 @@
 本项目的开发按阶段推进（S0–S7），每个阶段有独立报告（`docs/`）与可复现命令。
 版本号遵循 mooncakes 发布版本；日期为提交日期。
 
+## [0.1.2] — 2026-11-28
+
+适配 MoonBit 1.0 release candidate（moon `0.1.20261126` / moonc `1.0.0-rc1`）：
+
+- `src/abi/codec.mbt`：三处 `Buffer::write_bytes` 改为 `write_bytesview`，字节输出不变。
+- `src/gen/guest_gen.mbt`：生成的 `dispatch` 上局部标注 `#warnings("-deprecated")`。
+  core 1.0 RC 给 `json::parse` 的 `max_nesting_depth` 加了 `label_migration(..., fill=false)`
+  且无替代别名，生成器仍按接口原样投射可选参数，故只在生成代码里抑制这一类告警，
+  其余告警保持开启；`--deny-warn` 重新全绿。生成物已按新语料重新产出。
+- CI 新增显式的 `moon build --target wasm --release` 步骤，让检查 / 构建 / 测试三段都在门禁里可见。
+- 全语料 565 个 `.mbti`、565 个 stub，`mypy --strict` 561 个源文件 0 报错；
+  171/171 MoonBit 测试、`moon check / test / fmt --deny-warn`（wasm + js）全过。
+
 ## [0.1.1] — 2026-11-23
 
 已发布至 mooncakes.io（`moon add gyyyy6/moonbridge@0.1.1`）。0.1.0 之后的所有内容都在这个版本里：

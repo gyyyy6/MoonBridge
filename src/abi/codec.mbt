@@ -91,12 +91,12 @@ fn write_value(buf : @buffer.Buffer, value : Value) -> Unit {
       buf.write_byte(TAG_STR.to_byte())
       let raw = @utf8.encode(s)
       write_varint(buf, raw.length())
-      buf.write_bytes(raw)
+      buf.write_bytesview(raw)
     }
     Bytes(b) => {
       buf.write_byte(TAG_BYTES.to_byte())
       write_varint(buf, b.length())
-      buf.write_bytes(b)
+      buf.write_bytesview(b)
     }
     List(items) => {
       buf.write_byte(TAG_LIST.to_byte())
@@ -349,7 +349,7 @@ pub fn encode_batch(frames : Array[Bytes]) -> Bytes {
   write_u32(buf, frames.length())
   for frame in frames {
     write_u32(buf, frame.length())
-    buf.write_bytes(frame)
+    buf.write_bytesview(frame)
   }
   buf.to_bytes()
 }

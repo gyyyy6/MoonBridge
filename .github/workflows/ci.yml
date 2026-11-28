@@ -31,6 +31,11 @@ jobs:
       - name: Test
         run: moon test --deny-warn
 
+      # Make the "build" half of the check/build/test gate explicit: the
+      # release wasm artifacts are what the wheel ships.
+      - name: Build (wasm release)
+        run: moon build --target wasm --release
+
       - name: Format
         run: moon fmt --check
 

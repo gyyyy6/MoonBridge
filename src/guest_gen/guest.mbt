@@ -84,7 +84,6 @@ priv struct Tables {
   builtin_SourceLoc : @abi.HandleTable[@ref.Ref[@builtin.SourceLoc]]
   builtin_StringBuilder : @abi.HandleTable[@ref.Ref[@builtin.StringBuilder]]
   builtin_StringView : @abi.HandleTable[@ref.Ref[@builtin.StringView]]
-  lexbuf_BytesLexbuf : @abi.HandleTable[@ref.Ref[@lexbuf.BytesLexbuf]]
   lexbuf_BytesScanner : @abi.HandleTable[@ref.Ref[@lexbuf.BytesScanner]]
   lexbuf_Lexbuf : @abi.HandleTable[@ref.Ref[@lexbuf.Lexbuf]]
   lexbuf_StringScanner : @abi.HandleTable[@ref.Ref[@lexbuf.StringScanner]]
@@ -114,7 +113,6 @@ let tables : Tables = {
   builtin_SourceLoc: @abi.HandleTable::new(),
   builtin_StringBuilder: @abi.HandleTable::new(),
   builtin_StringView: @abi.HandleTable::new(),
-  lexbuf_BytesLexbuf: @abi.HandleTable::new(),
   lexbuf_BytesScanner: @abi.HandleTable::new(),
   lexbuf_Lexbuf: @abi.HandleTable::new(),
   lexbuf_StringScanner: @abi.HandleTable::new(),
@@ -778,42 +776,6 @@ fn dec_builtin_StringView(v : @abi.Value?) -> @builtin.StringView? {
 }
 
 ///|
-fn dec_cb__to_opt_builtin_Bytes(v : @abi.Value?) -> (() -> @builtin.Bytes?)? {
-  match v {
-    Some(raw) =>
-      match raw.as_int() {
-        Some(id) =>
-          Some(fn() {
-            match invoke_callback(id, []) {
-              Some(v) => dec_builtin_Bytes(Some(v))
-              None => None
-            }
-          })
-        None => None
-      }
-    None => None
-  }
-}
-
-///|
-fn dec_cb__to_opt_str(v : @abi.Value?) -> (() -> String?)? {
-  match v {
-    Some(raw) =>
-      match raw.as_int() {
-        Some(id) =>
-          Some(fn() {
-            match invoke_callback(id, []) {
-              Some(v) => dec_str(Some(v))
-              None => None
-            }
-          })
-        None => None
-      }
-    None => None
-  }
-}
-
-///|
 /// A handle from the host, resolved against the table for `@lexbuf.Lexbuf`.
 fn dec_lexbuf_Lexbuf(v : @abi.Value?) -> @lexbuf.Lexbuf? {
   match v {
@@ -866,6 +828,24 @@ fn dec_cb_int_to_int(v : @abi.Value?) -> ((Int32) -> Int32)? {
                   None => 0
                 }
               None => 0
+            }
+          })
+        None => None
+      }
+    None => None
+  }
+}
+
+///|
+fn dec_cb__to_opt_str(v : @abi.Value?) -> (() -> String?)? {
+  match v {
+    Some(raw) =>
+      match raw.as_int() {
+        Some(id) =>
+          Some(fn() {
+            match invoke_callback(id, []) {
+              Some(v) => dec_str(Some(v))
+              None => None
             }
           })
         None => None
@@ -1053,25 +1033,9 @@ fn enc_builtin_StringView(v : @builtin.StringView?) -> @abi.Value raise {
 }
 
 ///|
-fn enc_lexbuf_BytesLexbuf(v : @lexbuf.BytesLexbuf?) -> @abi.Value raise {
-  match v {
-    Some(x) => @abi.Handle(tables.lexbuf_BytesLexbuf.insert(@ref.Ref(x)))
-    None => @abi.Value::unit()
-  }
-}
-
-///|
 fn enc_lexbuf_BytesScanner(v : @lexbuf.BytesScanner?) -> @abi.Value raise {
   match v {
     Some(x) => @abi.Handle(tables.lexbuf_BytesScanner.insert(@ref.Ref(x)))
-    None => @abi.Value::unit()
-  }
-}
-
-///|
-fn enc_lexbuf_Lexbuf(v : @lexbuf.Lexbuf?) -> @abi.Value raise {
-  match v {
-    Some(x) => @abi.Handle(tables.lexbuf_Lexbuf.insert(@ref.Ref(x)))
     None => @abi.Value::unit()
   }
 }
@@ -1116,7 +1080,6 @@ fn live_total() -> Int32 {
   tables.builtin_SourceLoc.live_count() +
   tables.builtin_StringBuilder.live_count() +
   tables.builtin_StringView.live_count() +
-  tables.lexbuf_BytesLexbuf.live_count() +
   tables.lexbuf_BytesScanner.live_count() +
   tables.lexbuf_Lexbuf.live_count() +
   tables.lexbuf_StringScanner.live_count() +
@@ -1149,11 +1112,10 @@ fn release_tag(tag : Int32, id : Int32) -> Bool {
     19 => tables.builtin_SourceLoc.release(id)
     20 => tables.builtin_StringBuilder.release(id)
     21 => tables.builtin_StringView.release(id)
-    22 => tables.lexbuf_BytesLexbuf.release(id)
-    23 => tables.lexbuf_BytesScanner.release(id)
-    24 => tables.lexbuf_Lexbuf.release(id)
-    25 => tables.lexbuf_StringScanner.release(id)
-    26 => tables.callbacks_Cursor.release(id)
+    22 => tables.lexbuf_BytesScanner.release(id)
+    23 => tables.lexbuf_Lexbuf.release(id)
+    24 => tables.lexbuf_StringScanner.release(id)
+    25 => tables.callbacks_Cursor.release(id)
     _ => false
   }
 }
@@ -1189,6 +1151,11 @@ fn release_pairs(items : Array[@abi.Value]) -> @abi.Status {
 /// `<declaring package>::<function>` or
 /// `<declaring package>::<Type>::<name>`, which is what the generated Python
 /// module sends.
+// Optional arguments are projected from the source interface dump, so a
+// migrated label (core 1.0 RC marks `max_nesting_depth` as such, with no
+// alias) is still passed faithfully here. Suppress only this deprecation
+// class inside the generated dispatcher; every other warning stays on.
+#warnings("-deprecated")
 fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
   let args = @abi.decode(payload) catch {
     _ => return @abi.Failed("malformed argument frame")
@@ -7338,19 +7305,6 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
         error => @abi.Failed(error.to_string())
       }
     }
-    "moonbitlang/core/lexbuf::BytesLexbuf::BytesLexbuf" => {
-      let a0 = match dec_cb__to_opt_builtin_Bytes(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/lexbuf::BytesLexbuf::BytesLexbuf: bad argument 1",
-          )
-      }
-      let value = @lexbuf.BytesLexbuf::BytesLexbuf(a0)
-      @abi.Ok(enc_lexbuf_BytesLexbuf(Some(value))) catch {
-        error => @abi.Failed(error.to_string())
-      }
-    }
     "moonbitlang/core/lexbuf::BytesScanner::BytesScanner" => {
       let a0 = match dec_builtin_BytesView(arg(argv, 0)) {
         Some(v) => v
@@ -7365,19 +7319,6 @@ fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {
         None => @lexbuf.BytesScanner::BytesScanner(a0)
       }
       @abi.Ok(enc_lexbuf_BytesScanner(Some(value))) catch {
-        error => @abi.Failed(error.to_string())
-      }
-    }
-    "moonbitlang/core/lexbuf::Lexbuf::Lexbuf" => {
-      let a0 = match dec_cb__to_opt_str(arg(argv, 0)) {
-        Some(v) => v
-        None =>
-          return @abi.Failed(
-            "moonbitlang/core/lexbuf::Lexbuf::Lexbuf: bad argument 1",
-          )
-      }
-      let value = @lexbuf.Lexbuf::Lexbuf(a0)
-      @abi.Ok(enc_lexbuf_Lexbuf(Some(value))) catch {
         error => @abi.Failed(error.to_string())
       }
     }

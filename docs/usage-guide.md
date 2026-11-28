@@ -131,7 +131,7 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser; irm https://cli.moonbitlang
 装完**重开终端**，验证：
 
 ```bash
-moon version     # 本手册实测：moon 0.1.20261119（moonc 0.10.22）
+moon version     # 本手册实测：moon 0.1.20261126（moonc 1.0.0-rc1）
 node --version   # 需要 18+，本手册实测：v22.22.2
 git --version
 ```

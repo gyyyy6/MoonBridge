@@ -1187,6 +1187,11 @@ fn render_dispatch(plan : Plan) -> String {
     "/// `<declaring package>::<function>` or\n" +
     "/// `<declaring package>::<Type>::<name>`, which is what the generated Python\n" +
     "/// module sends.\n" +
+    "// Optional arguments are projected from the source interface dump, so a\n" +
+    "// migrated label (core 1.0 RC marks `max_nesting_depth` as such, with no\n" +
+    "// alias) is still passed faithfully here. Suppress only this deprecation\n" +
+    "// class inside the generated dispatcher; every other warning stays on.\n" +
+    "#warnings(\"-deprecated\")\n" +
     "fn dispatch(symbol : String, payload : Bytes) -> @abi.Status {\n" +
     "  let args = @abi.decode(payload) catch {\n" +
     "    _ => return @abi.Failed(\"malformed argument frame\")\n" +
